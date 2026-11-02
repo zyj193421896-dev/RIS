@@ -294,8 +294,8 @@ class Rx706App:
         self.port = tk.StringVar(value="5001")
         self.console_port = tk.StringVar(value="5000")
         self.timeout = tk.StringVar(value="30")
-        self.length_unit = tk.StringVar(value="MiB")
-        self.length_value = tk.StringVar(value="8")
+        self.length_unit = tk.StringVar(value="秒")
+        self.length_value = tk.StringVar(value="1")
         self.output = tk.StringVar(value=self.default_path())
         self.note = tk.StringVar()
         self.auto_download = tk.BooleanVar(value=True)
@@ -390,7 +390,7 @@ class Rx706App:
         self.release_button = ttk.Button(actions, text="释放 DDR 数据", command=self.release)
         for button in [self.capture_button, self.download_button, self.resume_button, self.stop_button, self.release_button]:
             button.pack(side="left", padx=(0, 9))
-        self.spectrum_button = ttk.Button(actions, text="IQ 频谱分析…", command=self.open_spectrum)
+        self.spectrum_button = ttk.Button(actions, text="IQ 信号分析…", command=self.open_spectrum)
         self.spectrum_button.pack(side="left", padx=(0, 9))
 
         transfer = ttk.Frame(outer)

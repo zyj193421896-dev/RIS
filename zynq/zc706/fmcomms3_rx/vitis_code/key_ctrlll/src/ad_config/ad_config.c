@@ -299,11 +299,13 @@ const char *ad_config_status_string(int status)
  * cached PHY state does not describe registers programmed by a script. */
 #include "config915_data.h"
 #include "config2p4_data.h"
+#include "config5p8_data.h"
 #include "sleep.h"
 
 typedef struct {
     const config915_operation *operations;
-    u32 count, lo_hz;
+    u32 count;
+    u64 lo_hz;
     const char *name, *source_sha256;
     u8 tx_bist, tx_mask;
 } config_script_profile;
@@ -316,12 +318,17 @@ static const config_script_profile profile2p4 = {
     config2p4_operations, ARRAY_SIZE(config2p4_operations), 2400000000U,
     "CONFIG2P4", CONFIG2P4_SOURCE_SHA256, 0x00U, 0x00U
 };
+static const config_script_profile profile5p8 = {
+    config5p8_operations, ARRAY_SIZE(config5p8_operations), 5800000000ULL,
+    "CONFIG5P8", CONFIG5P8_SOURCE_SHA256, 0x00U, 0x00U
+};
 
 volatile struct {
     u32 magic, done;
     s32 result;
     u32 operations, writes, reads, polls, source_line;
-    u32 adc_hz, sample_hz, rx_lo_hz, tx_lo_hz;
+    u32 adc_hz, sample_hz;
+    u64 rx_lo_hz, tx_lo_hz;
     u32 input_select, attenuation_mdb, ensm, bist, clock_enable;
 } config_script_report;
 
@@ -367,7 +374,7 @@ static int config_script_poll(ad9361_device *radio, u16 reg, u8 mask,
     return -ETIMEDOUT;
 }
 
-static int config_script_read_clocks(ad9361_device *radio, u32 expected_lo_hz)
+static int config_script_read_clocks(ad9361_device *radio, u64 expected_lo_hz)
 {
     u8 a, b, c, integer, divider, rx, tx, lo_div;
     u32 bbpll, adc, dac, rate, channel, fraction, rf_integer;
@@ -416,15 +423,19 @@ static int config_script_read_clocks(ad9361_device *radio, u32 expected_lo_hz)
                     80000000ULL * fraction / RFPLL_MODULUS;
         frequency >>= 1U + ((lo_div >> (channel * 4U)) & 15U);
         if (channel) {
-            config_script_report.tx_lo_hz = (u32)frequency;
+            config_script_report.tx_lo_hz = frequency;
             ad_config_report.tx_lo_mhz = (u32)((frequency + 500000U) / 1000000U);
         } else {
-            config_script_report.rx_lo_hz = (u32)frequency;
+            config_script_report.rx_lo_hz = frequency;
             ad_config_report.rx_lo_mhz = (u32)((frequency + 500000U) / 1000000U);
         }
     }
-    xil_printf("RF SCRIPT LO readback: RX=%u TX=%u Hz; RF ports RX1A/RX2A, TX1A/TX2A\r\n",
-               (unsigned)config_script_report.rx_lo_hz, (unsigned)config_script_report.tx_lo_hz);
+    /* xil_printf does not support 64-bit integers; print MHz and six Hz digits. */
+    xil_printf("RF SCRIPT LO readback: RX=%u%06u TX=%u%06u Hz; RF ports RX1A/RX2A, TX1A/TX2A\r\n",
+               (unsigned)(config_script_report.rx_lo_hz / 1000000ULL),
+               (unsigned)(config_script_report.rx_lo_hz % 1000000ULL),
+               (unsigned)(config_script_report.tx_lo_hz / 1000000ULL),
+               (unsigned)(config_script_report.tx_lo_hz % 1000000ULL));
     if (ad_config_report.rx_sample_hz < 15359990U ||
         ad_config_report.rx_sample_hz > 15360010U ||
         ad_config_report.tx_sample_hz < 15359990U ||
@@ -536,8 +547,8 @@ static int ad_config_init_script(ad_config_device *dev, ad9361_device *radio,
     config_script_report.attenuation_mdb = 20000U;
     ad_config_report.tx_attenuation_mdb[0] = 20000U;
     ad_config_report.tx_attenuation_mdb[1] = 20000U;
-    /* The 915 MHz profile retains its original TX test tone. The 2.4 GHz
-     * receive profile leaves BIST disabled; temporary PN is restored by main.
+    /* The 915 MHz profile retains its original TX test tone. The 2.4/5.8 GHz
+     * receive profiles leave BIST disabled; temporary PN is restored by main.
      * Neither profile injects synthetic data into the normal RX stream. */
     SCRIPT_STEP(config_script_write(radio, 0x3F5, 0x00));
     SCRIPT_STEP(config_script_write(radio, 0x3F6, profile->tx_mask));
@@ -582,9 +593,16 @@ int ad_config_init_2p4(ad_config_device *dev, ad9361_device *radio)
     return ad_config_init_script(dev, radio, &profile2p4);
 }
 
+int ad_config_init_5p8(ad_config_device *dev, ad9361_device *radio)
+{
+    return ad_config_init_script(dev, radio, &profile5p8);
+}
+
 int ad_config_init_selected(ad_config_device *dev, ad9361_device *radio)
 {
-#if RX_RF_PROFILE == RX_RF_PROFILE_2P4
+#if RX_RF_PROFILE == RX_RF_PROFILE_5P8
+    return ad_config_init_5p8(dev, radio);
+#elif RX_RF_PROFILE == RX_RF_PROFILE_2P4
     return ad_config_init_2p4(dev, radio);
 #else
     return ad_config_init_915(dev, radio);

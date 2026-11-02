@@ -5,6 +5,9 @@ export PATH="/home/yyz/vivado2020.2/main/Vitis/2020.2/gnu/aarch32/lin/gcc-arm-no
 python3 "$project_root/scripts/generate_ad9361_script.py" \
     "$project_root/config/config2p4" \
     "$project_root/vitis_code/key_ctrlll/src/ad_config/config2p4_data.h"
+python3 "$project_root/scripts/generate_ad9361_script.py" \
+    "$project_root/config/config5p8" \
+    "$project_root/vitis_code/key_ctrlll/src/ad_config/config5p8_data.h" --symbol config5p8
 if [[ ! -f "$project_root/vitis_code/network_bsp/ps7_cortexa9_0/lib/liblwip4.a" ]]; then
     xsct "$project_root/scripts/build_network_bsp.tcl"
 fi

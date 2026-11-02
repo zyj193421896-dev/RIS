@@ -11,7 +11,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "host"))
-from rx706_spectrum import AnalysisCancelled, analyze_bin, display_trace
+from rx706_spectrum import AnalysisCancelled, analyze_bin, display_trace, phase_trace
 
 FS = 15360000
 N = 4096
@@ -59,6 +59,64 @@ class SpectrumTests(unittest.TestCase):
         expected = 10 * np.log10(((1024 / 2048) ** 2 + (512 / 2048) ** 2) / 2)
         self.assertAlmostEqual(result.peak_dbfs, expected, delta=0.015)
 
+    def test_power_constellation_time_and_frequency_diagnostics(self):
+        tones(count=3*N, amp1=512, dc=200).tofile(self.path)
+        result = analyze_bin(self.path, first_tuple=N, nfft=N, averages=2)
+        self.assertAlmostEqual(result.power_dbfs,
+                               10*np.log10((512**2+200**2)/2048**2), delta=.02)
+        self.assertAlmostEqual(result.ac_power_dbfs, 20*np.log10(512/2048), delta=.02)
+        self.assertAlmostEqual(result.dc_iq.real, 200, delta=.1)
+        self.assertAlmostEqual(result.dc_iq.imag, 0, delta=.1)
+        self.assertAlmostEqual(result.papr_db,
+                               10*np.log10((512+200)**2/(512**2+200**2)), delta=.02)
+        self.assertLessEqual(len(result.constellation), 8192)
+        original = tones(count=3*N, amp1=512, dc=200)
+        indices = result.constellation_indices
+        np.testing.assert_allclose(result.constellation,
+                                   original[indices,0]+1j*original[indices,1])
+        np.testing.assert_allclose(result.block_time_s, [1.5*N/FS, 2.5*N/FS])
+        np.testing.assert_allclose(result.block_power_dbfs, result.power_dbfs)
+        self.assertEqual(result.peaks[0][0], 525*FS/N)
+        self.assertLessEqual(result.occupied_99_hz[0], result.peak_hz)
+        self.assertGreaterEqual(result.occupied_99_hz[1], result.peak_hz)
+
+    def test_diagnostics_silence_and_constellation_bound(self):
+        np.zeros((N*4,4),dtype='<i2').tofile(self.path)
+        result = analyze_bin(self.path, nfft=N, averages=4)
+        self.assertEqual(len(result.constellation),8192)
+        self.assertEqual(result.power_dbfs,-180)
+        self.assertEqual(result.peaks,[])
+        self.assertIsNone(result.papr_db)
+        self.assertIsNone(result.occupied_99_hz)
+
+    def test_phase_known_tone_and_simultaneous_reference(self):
+        t = np.arange(N)
+        reference = 800*np.exp(2j*np.pi*125*t/N)
+        signal = reference*np.exp(1j*np.pi/3)
+        data = np.rint(np.column_stack((signal.real,signal.imag,
+                                        reference.real,reference.imag))).astype('<i2')
+        data.tofile(self.path)
+        result = analyze_bin(self.path,nfft=N)
+        raw = phase_trace(result)
+        np.testing.assert_allclose(raw['relative_deg'],60,atol=.11)
+        expected = 60+360*125*t/N
+        np.testing.assert_allclose(raw['unwrapped_deg'],expected,atol=.06)
+        shifted = phase_trace(result,shifted=True)
+        np.testing.assert_allclose(shifted['wrapped_deg'],60,atol=.06)
+        reversed_result = analyze_bin(self.path,nfft=N,channel=2)
+        np.testing.assert_allclose(phase_trace(reversed_result)['relative_deg'],-60,atol=.11)
+
+    def test_phase_is_undefined_at_zero_and_does_not_bridge_gaps(self):
+        data = tones(amp1=0,amp2=0)
+        data[100:200,:2] = [500,500]
+        data[300:400,:2] = [-500,-500]
+        data.tofile(self.path)
+        trace = phase_trace(analyze_bin(self.path,nfft=N))
+        self.assertTrue(np.isnan(trace['unwrapped_deg'][:100]).all())
+        np.testing.assert_allclose(trace['unwrapped_deg'][100:200],45)
+        np.testing.assert_allclose(trace['unwrapped_deg'][300:400],-135)
+        self.assertTrue(np.isnan(trace['relative_deg']).all())
+
     def test_2p4_ghz_metadata_keeps_unsigned_lo_and_baseband_peak(self):
         tones().tofile(self.path)
         self.metadata(rx_lo_config_hz=2_400_000_000)
@@ -66,6 +124,13 @@ class SpectrumTests(unittest.TestCase):
         self.assertEqual(result.lo_hz, 2_400_000_000)
         self.assertEqual(result.peak_hz, 525 * FS / N)
         self.assertEqual(result.lo_hz + result.peak_hz, 2_401_968_750)
+
+    def test_5p8_ghz_metadata_exceeds_uint32_without_truncation(self):
+        tones().tofile(self.path)
+        self.metadata(rx_lo_config_hz=5_800_000_000)
+        result=analyze_bin(self.path,nfft=N)
+        self.assertEqual(result.lo_hz,5_800_000_000)
+        self.assertEqual(result.lo_hz+result.peak_hz,5_801_968_750)
 
     def test_dc_removal_and_raw_rms(self):
         tones(amp1=100, bin1=123, dc=900).tofile(self.path)

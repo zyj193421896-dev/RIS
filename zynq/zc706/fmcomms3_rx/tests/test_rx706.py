@@ -127,10 +127,10 @@ class TransferTests(unittest.TestCase):
                 self.assertEqual(measurement[3:7], [0, 0, 0, 0])
 
     def test_profile_metadata_survives_bin_export(self):
-        profile = int(os.environ.get('RX706_TEST_PROFILE', '2400'))
-        expected = 2_400_000_000 if profile == 2400 else 915_000_000
+        profile = int(os.environ.get('RX706_TEST_PROFILE', '5800'))
+        expected = profile * 1_000_000
         self.assertEqual(self.info['rx_lo_config_hz'], expected)
-        self.assertEqual(self.info['rf_profile'], 'CONFIG2P4' if profile == 2400 else 'CONFIG915')
+        self.assertEqual(self.info['rf_profile'], {2400:'CONFIG2P4',5800:'CONFIG5P8',915:'CONFIG915'}[profile])
         saved = self.fetch()
         self.assertEqual(saved['capture']['rx_lo_config_hz'], expected)
 

@@ -29,6 +29,18 @@ class Spectrum:
     peak_dbfs: float | None
     rms_counts: float
     clipped: int
+    power_dbfs: float
+    ac_power_dbfs: float
+    dc_iq: complex
+    papr_db: float | None
+    constellation: object
+    constellation_indices: object
+    block_time_s: object
+    block_power_dbfs: object
+    peaks: object
+    occupied_99_hz: object
+    waveform: object
+    reference_waveform: object
 
     @property
     def samples(self):
@@ -111,6 +123,9 @@ def analyze_bin(filename, *, channel=1, nfft=65536, averages=16, first_tuple=0,
         scale = float(window.sum()) ** 2
         power = np.zeros(nfft, dtype=np.float64)
         energy, clipped = 0.0, 0
+        ac_energy, dc_sum, max_power = 0.0, 0j, 0.0
+        points, point_indices, block_powers = [], [], []
+        point_budget = max(1, 8192 // averages)
         for block_index in range(averages):
             _cancel(cancel_event)
             raw = np.fromfile(stream, dtype="<i2", count=nfft * 4)
@@ -132,7 +147,21 @@ def analyze_bin(filename, *, channel=1, nfft=65536, averages=16, first_tuple=0,
                     "请检查采集及存储/读出数据的完整性。")
             clipped += int(np.count_nonzero(np.any((iq <= -2048) | (iq >= 2047), axis=1)))
             x = iq[:, 0].astype(np.float64) + 1j * iq[:, 1].astype(np.float64)
+            if block_index == 0:
+                waveform = x[:4096].copy()
+                other = raw.reshape(-1, 4)[:len(waveform), (2 if channel == 1 else 0): (4 if channel == 1 else 2)]
+                reference_waveform = other[:, 0].astype(float) + 1j*other[:, 1].astype(float)
+                bad_reference = np.any((other < -2048) | (other > 2047), axis=1)
+                reference_waveform[bad_reference] = complex(float('nan'), float('nan'))
             energy += float(np.vdot(x, x).real)
+            dc_sum += complex(x.sum())
+            ac_energy += float(np.vdot(x - x.mean(), x - x.mean()).real)
+            max_power = max(max_power, float(np.max(abs(x) ** 2)))
+            block_powers.append(float(np.mean(abs(x) ** 2)))
+            # Contiguous short runs avoid a regular decimator hiding tone phase.
+            keep = min(point_budget, nfft)
+            points.append(x[:keep].copy())
+            point_indices.append(first_tuple + block_index * nfft + np.arange(keep))
             if remove_dc:
                 x -= x.mean()
             transformed = np.fft.fft((x / 2048.0) * window)
@@ -146,11 +175,68 @@ def analyze_bin(filename, *, channel=1, nfft=65536, averages=16, first_tuple=0,
     dbfs = 10.0 * np.log10(np.maximum(power, 1e-18))
     peak = int(np.argmax(power))
     has_peak = power[peak] > 1e-18
+    count = nfft * averages
+    def level(value):
+        return float(10 * np.log10(max(value / 2048.0 ** 2, 1e-18)))
+    candidates = np.flatnonzero((power >= np.roll(power, 1)) &
+                               (power > np.roll(power, -1)) & (power > 1e-18))
+    strongest = []
+    for index in candidates[np.argsort(power[candidates])[::-1]]:
+        if all(min(abs(int(index)-k), nfft-abs(int(index)-k)) >= 4 for k in strongest):
+            strongest.append(int(index))
+        if len(strongest) == 5:
+            break
+    peaks = [(float(frequencies[k]), float(dbfs[k])) for k in strongest]
+    occupied = None
+    if power.sum() > 1e-18:
+        cumulative = np.cumsum(power) / power.sum()
+        low, high = np.searchsorted(cumulative, [.005, .995])
+        occupied = (float(frequencies[low]), float(frequencies[min(high, nfft-1)]))
     return Spectrum(path, channel, rate, source, lo, first_tuple, size // 8, nfft, averages,
                     remove_dc, frequencies, dbfs,
                     float(frequencies[peak]) if has_peak else None,
                     float(dbfs[peak]) if has_peak else None,
-                    math.sqrt(energy / (nfft * averages)), clipped)
+                    math.sqrt(energy / count), clipped,
+                    level(energy / count), level(ac_energy / count), dc_sum / count,
+                    float(10*np.log10(max_power/(energy/count))) if energy else None,
+                    np.concatenate(points), np.concatenate(point_indices),
+                    (first_tuple + (np.arange(averages)+.5)*nfft)/rate,
+                    np.array([level(v) for v in block_powers]), peaks, occupied,
+                    waveform, reference_waveform)
+
+
+def phase_trace(result, *, shifted=False, floor_dbfs=-45.0):
+    """Contiguous waveform phases; never unwrap decimated/gapped constellation points.
+
+    The floor is a display amplitude gate, not an estimate of signal-to-noise ratio.
+    Relative phase uses simultaneous raw channels and requires a coherent reference
+    for a propagation/channel interpretation. It is not a reflection-phase estimate.
+    """
+    import numpy as np
+    if not math.isfinite(floor_dbfs):
+        raise ValueError('相位显示门限必须是有限的 dBFS 数值')
+    raw = result.waveform
+    x = raw.copy()
+    time = np.arange(len(x))/result.sample_rate_hz
+    if shifted:
+        x -= result.dc_iq
+        if result.peak_hz is not None:
+            x *= np.exp(-2j*np.pi*result.peak_hz*time)
+    minimum = 2048.0 * 10**(floor_dbfs/20)
+    valid = np.isfinite(x) & (abs(x) >= minimum) & (abs(x) > 0)
+    phase = np.where(valid, np.angle(x, deg=True), np.nan)
+    unwrapped = np.full(len(x), np.nan)
+    # Restart at every low-amplitude gap; phase through such gaps is undefined.
+    edges = np.diff(np.r_[False, valid, False].astype(int))
+    for start, end in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        unwrapped[start:end] = np.rad2deg(np.unwrap(np.angle(x[start:end])))
+    ref = result.reference_waveform
+    relative_valid = (np.isfinite(ref) & (abs(ref) >= minimum) & (abs(ref) > 0) &
+                      (abs(raw) >= minimum) & (abs(raw) > 0))
+    relative = np.where(relative_valid, np.angle(raw*ref.conj(), deg=True), np.nan)
+    return dict(time_s=time+result.first_tuple/result.sample_rate_hz,
+                iq=x, wrapped_deg=phase, unwrapped_deg=unwrapped,
+                relative_deg=relative, valid=valid)
 
 
 def display_trace(result, max_points=8192):

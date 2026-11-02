@@ -181,7 +181,7 @@ int capture_store_json(char *b, unsigned capacity)
     return snprintf(b, capacity,
         "{\"ok\":true,\"protocol\":1,\"state\":\"%s\",\"capture_id\":\"%s\","
         "\"bytes\":%u,\"received_bytes\":%u,\"tuples\":%u,\"packets\":%u,\"completed_packets\":%u,"
-        "\"sample_rate_hz\":%u,\"rx_lo_config_hz\":%u,\"rf_profile\":\"%s\",\"channels\":2,"
+        "\"sample_rate_hz\":%u,\"rx_lo_config_hz\":%llu,\"rf_profile\":\"%s\",\"channels\":2,"
         "\"order\":[\"I1\",\"Q1\",\"I2\",\"Q2\"],\"dtype\":\"int16\",\"byte_order\":\"little\","
         "\"valid_bits\":12,\"data_base\":%u,\"max_bytes\":%u,\"chunk_bytes\":%u,"
         "\"address_mode\":\"banked-gp0\",\"physical_ddr_bytes\":2147483648,\"cpu_window_bytes\":1073741824,"
@@ -200,7 +200,7 @@ int capture_store_json(char *b, unsigned capacity)
         (unsigned)capture_store.layout.bytes, (unsigned)capture_store.received_bytes,
         (unsigned)capture_store.layout.tuples, (unsigned)capture_store.layout.packets,
         (unsigned)capture_store.completed_packets, (unsigned)CAPTURE_SAMPLE_RATE,
-        (unsigned)RX_RF_LO_HZ, RX_RF_PROFILE_NAME,
+        (unsigned long long)RX_RF_LO_HZ, RX_RF_PROFILE_NAME,
         (unsigned)CAPTURE_DATA_BASE, (unsigned)CAPTURE_MAX_BYTES, (unsigned)CAPTURE_CHUNK_BYTES,
         (unsigned)capture_store.layout.duration_us, (unsigned)capture_store.elapsed_us,
         capture_store.result, capture_store.reset_verified,

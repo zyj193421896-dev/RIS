@@ -1,7 +1,8 @@
 ZC706 / FMCOMMS3 2.4 GHz 接收测试固件
 日期：2026-10-20
 
-当前构建默认选择 CONFIG2P4；原 CONFIG915 源表和初始化入口保留。
+本文记录原 CONFIG2P4 配置。2026-10-28 新增 CONFIG5P8 并设为源码默认，见 CONFIG5P8_RX_GUIDE.md。
+使用 export/key_ctrlll_2p4.elf 可继续运行原2.4 GHz版本；三个配置源表和初始化入口均保留。
 用户导出脚本：config/config2p4，保持原始文件不变。
 脚本由 scripts/generate_ad9361_script.py 转为 config2p4_data.h。
 build_rx_network.sh 会先同步生成表，再编译并更新 export/key_ctrlll.elf。

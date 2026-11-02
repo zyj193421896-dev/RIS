@@ -77,6 +77,7 @@ extern volatile ad_config_report_type ad_config_report;
 int ad_config_init(ad_config_device *dev, ad9361_device *transport);
 int ad_config_init_915(ad_config_device *dev, ad9361_device *transport);
 int ad_config_init_2p4(ad_config_device *dev, ad9361_device *transport);
+int ad_config_init_5p8(ad_config_device *dev, ad9361_device *transport);
 int ad_config_init_selected(ad_config_device *dev, ad9361_device *transport);
 /* Internal RX-port test tone at Fs/16=3.84 MHz, -6 dBFS; no RF input required.
  * enabled=0 restores ordinary RX samples. Does not arm PL/DMA or reset RF.
