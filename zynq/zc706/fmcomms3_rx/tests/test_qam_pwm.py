@@ -118,7 +118,7 @@ class MixedQAMTests(unittest.TestCase):
     def test_validation_silence_and_cancellation(self):
         for change in [dict(symbols='0 0'), dict(symbols='0 13 0'),
                        dict(symbol_hz=1000000), dict(gap_s=-1),
-                       dict(width_offset_chips=-5), dict(qam_search_symbols=0)]:
+                       dict(width_offset_chips=-5), dict(qam_search_symbols=-1)]:
             with self.assertRaises(ValueError):
                 validate_pwm_header(change, 10000000)
         with self.assertRaisesRegex(ValueError, '未找到'):
@@ -153,7 +153,7 @@ class MixedQAMTests(unittest.TestCase):
             self.assertIn('PWM前导候选', view.status.get())
             self.assertIn('PWM粗频偏', view.summary.get())
 
-    def test_removed_qam_header_modes_do_not_trigger_gui_demodulation(self):
+    def test_switching_between_qam_header_modes_reanalyzes(self):
         from test_signal_analysis_view import headless_window
         from rx706_spectrum_gui import QAM_MODE, QAM_PWM_MODE
         view = headless_window()
@@ -163,13 +163,13 @@ class MixedQAMTests(unittest.TestCase):
         view.recovery = SimpleNamespace(kind='qam', pwm_preamble=None)
         view.constellation_mode.set(QAM_PWM_MODE)
         view.on_mode_changed()
-        view.analyze.assert_not_called()
+        view.analyze.assert_called_once()
         view.analyze.reset_mock()
         view.recovery.pwm_preamble = {}
         view.constellation_mode.set(QAM_MODE)
         view.on_mode_changed()
-        view.analyze.assert_not_called()
-        self.assertEqual(view.draw_constellation.call_count, 2)
+        view.analyze.assert_called_once()
+        view.draw_constellation.assert_not_called()
 
 
 if __name__ == '__main__':

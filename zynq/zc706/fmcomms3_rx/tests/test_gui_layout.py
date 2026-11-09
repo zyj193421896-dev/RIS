@@ -246,7 +246,9 @@ class LayoutTests(unittest.TestCase):
         view=SpectrumWindow(self.root)
         try:
             view.window.withdraw()
-            self.root.update()
+            # Settle hidden geometry without pumping macOS native window events.
+            # Visible table resize tests above still exercise full root.update().
+            self.root.update_idletasks()
             self.assertEqual(len(view.figure.axes),3)
             self.assertFalse(hasattr(view,'power_axes'))
             self.assertFalse(hasattr(view,'phase_axes'))
@@ -295,14 +297,14 @@ class LayoutTests(unittest.TestCase):
                 thread.return_value.start.assert_called_once()
         finally:view.close()
 
-    def test_retired_modes_are_removed_and_raw_pwm_tdcm_remain(self):
+    def test_pwm_and_all_qam_modes_remain_available(self):
         from rx706_spectrum_gui import QAM_PWM_MODE, QAM_MODE, RECOVERY_MODE, PWM_MODE, PWM2_MODE, TDCM_MODE
         view=SpectrumWindow(self.root)
         try:
             view.window.withdraw()
-            self.assertEqual(RECOVERY_MODES, (PWM_MODE, PWM2_MODE, TDCM_MODE))
+            self.assertTrue({PWM_MODE, PWM2_MODE, TDCM_MODE}.issubset(RECOVERY_MODES))
             for mode in (QAM_PWM_MODE, QAM_MODE, RECOVERY_MODE):
-                self.assertNotIn(mode, RECOVERY_MODES)
+                self.assertIn(mode, RECOVERY_MODES)
             view.refresh_parameter_visibility()
             self.assertEqual(view.constellation_mode.get(), PWM2_MODE)
         finally:view.close()
@@ -333,6 +335,60 @@ class LayoutTests(unittest.TestCase):
                 self.assertNotIn('preamble_options',options)
                 thread.return_value.start.assert_called_once()
         finally:view.close()
+
+    def test_mixed_pwm_qam_mode_defaults_and_worker_options(self):
+        from rx706_spectrum_gui import QAM_PWM_MODE
+        view=SpectrumWindow(self.root)
+        try:
+            view.window.withdraw()
+            view.filename.set('mixed.bin')
+            view.constellation_mode.set(QAM_PWM_MODE)
+            self.assertIn(QAM_PWM_MODE, RECOVERY_MODES)
+            self.assertEqual([view.pwm2_total_chips.get(),view.pwm2_prefix_chips.get(),view.pwm2_guard_chips.get()],
+                             ['25','5','8'])
+            self.assertEqual(view.qam_pwm_symbols.get(),'0 0 0')
+            view.qam_pwm_gap_us.set('12.5')
+            view.qam_pwm_width_offset.set('-0.25')
+            view.qam_pwm_qam_window.set('4')
+            with patch('rx706_spectrum_gui.threading.Thread') as thread:
+                view.analyze()
+                options=thread.call_args.kwargs['args'][2]
+                self.assertEqual(options['kind'],'qam')
+                self.assertNotIn('preamble_options',options)
+                pwm=options['pwm_preamble_options']
+                self.assertEqual((pwm['total_chips'],pwm['prefix_chips'],pwm['guard_chips']),(25,5,8))
+                self.assertEqual(pwm['symbols'],'0 0 0')
+                self.assertAlmostEqual(pwm['gap_s'],.0000125)
+                self.assertEqual(pwm['width_offset_chips'],-.25)
+                self.assertEqual(pwm['qam_search_symbols'],4)
+                thread.return_value.start.assert_called_once()
+        finally:view.close()
+
+
+    def test_qam_configurable_preamble_is_delivered_to_worker(self):
+        from rx706_spectrum_gui import QAM_MODE
+        view=SpectrumWindow(self.root)
+        try:
+            view.window.withdraw()
+            view.filename.set('local.bin')
+            view.constellation_mode.set(QAM_MODE)
+            self.assertFalse(view.qam_preamble_enabled.get())
+            view.qam_preamble_enabled.set(True)
+            view.qam_preamble_symbols.set('0x00 0b00010001 255')
+            view.qam_preamble_frequency_khz.set('0.7')
+            view.qam_preamble_search_ms.set('750')
+            with patch('rx706_spectrum_gui.threading.Thread') as thread:
+                view.analyze()
+                options=thread.call_args.kwargs['args'][2]
+                self.assertEqual(options['kind'],'qam')
+                pilot=options['preamble_options']
+                self.assertEqual(pilot['symbols'],'0x00 0b00010001 255')
+                self.assertEqual(pilot['max_frequency_hz'],700)
+                self.assertEqual(pilot['search_s'],.75)
+                self.assertEqual(pilot['representation'],'labels')
+                thread.return_value.start.assert_called_once()
+        finally:view.close()
+
 
 
 if __name__=='__main__':unittest.main()

@@ -37,7 +37,9 @@ def validate_tdcm(fs, symbol_hz, options):
         raise ValueError('TDCM数据符号数须为0～1000000的整数；0表示处理到文件尾')
     if normalization not in ('pwm', 'blind'):
         raise ValueError('TDCM归一化须为PWM两态参考或盲归一化')
-    return dict(base_hz=base, harmonic=int(harmonic), amplitude_scale=amplitude,
+    from rx706_qam_payload import validate_payload_options
+    payload=validate_payload_options(options)
+    return dict(**payload,base_hz=base, harmonic=int(harmonic), amplitude_scale=amplitude,
                 phase_deg=phase, payload_symbols=int(count), normalization=normalization,
                 cycles_per_symbol=int(round(cycles)))
 
@@ -128,38 +130,65 @@ def _pwm_reference(x, fs, sync, options, cancel_event):
     return frequency,low,high_level,100*math.sqrt(error)/abs(high_level-low)
 
 
-def _coefficient_pilot(coefficients, points, rate, bound, tolerance, window, decide, order, cancel_event):
+def _coefficient_pilot(coefficients, points, rate, bound, tolerance, window, decide, order, cancel_event,
+                       *,orientation='normal',fit_dc_offset=False,estimate_frequency=True,return_details=False):
+    from rx706_qam_training import fit_training
     length = len(points)
     best = None
     j = np.arange(length)
     centered = j-j.mean()
-    for start in range(min(int(window)+1,len(coefficients)-length-15)):
+    failures=[]
+    for start in range(min(int(window)+1,len(coefficients)-length)):
         _cancel(cancel_event)
-        ratios = coefficients[start:start+length]/points
-        phase = np.unwrap(np.angle(ratios))
-        frequency = float(np.dot(phase,centered)/np.sum(centered**2)*rate/(2*np.pi))
-        if abs(frequency) > bound:
-            continue
-        v = coefficients[start:start+length]*np.exp(-2j*np.pi*frequency*j/rate)
-        gain = np.vdot(points,v)/np.vdot(points,points)
-        if abs(gain) < 1e-12:
-            continue
-        error = float(np.mean(abs(v/gain-points)**2)/np.mean(abs(points)**2))
-        if error > (tolerance/100)**2:
-            continue
-        data = coefficients[start+length:start+length+128]/gain*np.exp(-2j*np.pi*frequency*np.arange(length,min(length+128,len(coefficients)-start))/rate)
-        ideal,_,_ = decide(data,order)
-        score = error+float(np.mean(abs(data-ideal)**2))
-        if best is None or score < best[0]:
-            best = score,start,frequency,gain,error
+        try:fit=fit_training(coefficients[start:start+length],points,rate,bound,tolerance,
+                orientation=orientation,fit_dc_offset=fit_dc_offset,estimate_frequency=estimate_frequency,cancel_event=cancel_event)
+        except ValueError as exc:failures.append(str(exc));continue
+        if best is None or fit['evm_percent']<best[0]:best=fit['evm_percent'],start,fit
     if best is None:
-        raise ValueError('PWM后的TDCM谐波系数未匹配配置的QAM训练序列')
-    return best[1:]
+        raise ValueError('PWM后的TDCM谐波系数未匹配配置的QAM训练序列：'+(failures[0] if failures else '训练后没有完整净荷窗口'))
+    _,start,fit=best
+    if return_details:return start,fit
+    return start,fit['frequency_hz'],fit['gain'],(fit['evm_percent']/100)**2
 
 
 def recover_tdcm(spectrum, *, duration_s=1, center_hint_hz=-200000, symbol_hz=19531.25,
                  order=256, tdcm_options=None, pwm_preamble_options=None,
                  preamble_options=None, cancel_event=None):
+    replay = (tdcm_options or {}).get('replay_recipe')
+    if replay is not None:
+        if isinstance(replay,dict) and replay.get('method')=='frozen_central_tdcm_capture':
+            from rx706_tdcm_frozen import replay_frozen_capture
+            return replay_frozen_capture(spectrum,replay,cancel_event=cancel_event)
+        if isinstance(replay,dict) and replay.get('method')=='headerless_tdcm_config':
+            from rx706_tdcm_headerless import replay_headerless_config
+            return replay_headerless_config(spectrum,replay,cancel_event=cancel_event)
+        from rx706_tdcm_auto import replay_recipe
+        return replay_recipe(spectrum,replay,cancel_event=cancel_event)
+    acquisition = (tdcm_options or {}).get('acquisition_mode','pwm')
+    if acquisition != 'pwm':
+        from rx706_tdcm_headerless import recover_headerless_tdcm,validate_acquisition
+        validate_acquisition(acquisition)
+        return recover_headerless_tdcm(spectrum,duration_s=duration_s,center_hint_hz=center_hint_hz,
+            symbol_hz=symbol_hz,order=order,tdcm_options=tdcm_options,preamble_options=preamble_options,
+            cancel_event=cancel_event,progress=(tdcm_options or {}).get('_progress_callback'))
+    search = (tdcm_options or {}).get('auto_search', {})
+    if not isinstance(search,dict):
+        raise ValueError('TDCM自动搜索须为配置对象')
+    if search.get('enabled',False):
+        from rx706_tdcm_auto import search_compensations
+        return search_compensations(spectrum,duration_s=duration_s,center_hint_hz=center_hint_hz,
+            symbol_hz=symbol_hz,order=order,tdcm_options=tdcm_options,
+            pwm_preamble_options=pwm_preamble_options,preamble_options=preamble_options,
+            cancel_event=cancel_event,progress=(tdcm_options or {}).get('_progress_callback'))
+    compensation = (tdcm_options or {}).get('compensation', {})
+    if not isinstance(compensation, dict):
+        raise ValueError('TDCM compensation须为配置对象')
+    if compensation.get('enabled', False):
+        from rx706_tdcm_debug import recover_compensated_tdcm
+        return recover_compensated_tdcm(spectrum,duration_s=duration_s,
+            center_hint_hz=center_hint_hz,symbol_hz=symbol_hz,order=order,
+            tdcm_options=tdcm_options,pwm_preamble_options=pwm_preamble_options,
+            preamble_options=preamble_options,cancel_event=cancel_event)
     from rx706_qam import decide
     fs = spectrum.sample_rate_hz
     if order not in (16,64,256):
@@ -173,6 +202,8 @@ def recover_tdcm(spectrum, *, duration_s=1, center_hint_hz=-200000, symbol_hz=19
             abs(center_hint_hz+selected)+pwm['max_frequency_hz']+symbol_hz/2 >= fs/2):
         raise ValueError('TDCM目标谐波带宽超出采样范围')
     training = None if preamble_options is None else validate_preamble(preamble_options,order,symbol_hz)
+    from rx706_qam_training import validate_orientation,fit_training,normalize_training
+    training_orientation,training_offset_enabled=validate_orientation(preamble_options or {})
     x,count,clipped = _read_span(spectrum,duration_s,center_hint_hz,cancel_event,max_samples=math.ceil(fs))
     x *= np.exp(-2j*np.pi*center_hint_hz*np.arange(count)/fs)
     sync = acquire_pwm_header(x,fs,dict(pwm,symbols=' '.join(map(str,pwm['symbols']))),cancel_event)
@@ -182,32 +213,38 @@ def recover_tdcm(spectrum, *, duration_s=1, center_hint_hz=-200000, symbol_hz=19
     start = sync['qam_index']
     coefficients,centres = harmonic_coefficients(x,fs,start,symbol_hz,selected,
         count=options['payload_symbols'],cancel_event=cancel_event)
-    if len(coefficients) < 16:
-        raise ValueError('TDCM至少需要16个数据符号用于显示与判决')
+    minimum=16 if training is None else len(training[0])+1
+    if len(coefficients) < minimum:
+        raise ValueError('TDCM窗口不足：无训练至少16窗；已知训练后至少1个净荷窗')
     original_coefficients = coefficients.copy()
-    pilot = None
+    pilot = None;training_records=[]
     phase = math.radians(options['phase_deg'])
     if training is not None:
         points,bound,tolerance,_ = training
-        at,residual,_,_ = _coefficient_pilot(coefficients,points,symbol_hz,bound,tolerance,
-            pwm['qam_search_symbols'],decide,order,cancel_event)
+        at,training_fit = _coefficient_pilot(coefficients,points,symbol_hz,bound,tolerance,
+            pwm['qam_search_symbols'],decide,order,cancel_event,orientation=training_orientation,
+            fit_dc_offset=training_offset_enabled,return_details=True)
+        residual=training_fit['frequency_hz']
         # Re-extract from original IQ after removing the remaining frequency.
         x *= np.exp(-2j*np.pi*residual*np.arange(count)/fs)
         frequency += residual
         coefficients,centres = harmonic_coefficients(x,fs,start,symbol_hz,selected,
             count=options['payload_symbols'],cancel_event=cancel_event)
         observed = coefficients[at:at+len(points)]
-        gain = np.vdot(points,observed)/np.vdot(points,points)
-        if abs(gain) < 1e-12:
-            raise ValueError('TDCM的QAM训练幅度不足')
-        pilot_error = float(100*np.sqrt(np.mean(abs(observed/gain-points)**2)/np.mean(abs(points)**2)))
-        if pilot_error > tolerance:
-            raise ValueError('重新提取的TDCM QAM训练未通过匹配容差')
+        fitted=fit_training(observed,points,symbol_hz,bound,tolerance,
+            orientation='conjugate' if training_fit['conjugated'] else 'normal',fit_dc_offset=training_offset_enabled)
+        gain=fitted['gain'];pilot_error=fitted['evm_percent'];normalized_pilot=normalize_training(observed,fitted)
         first = at+len(points)
-        z = coefficients[first:]/gain
+        z = normalize_training(coefficients[first:],fitted)
         pilot = dict(length=len(points),time_s=(centres[at]+spectrum.first_tuple)/fs,
             payload_time_s=(centres[first]+spectrum.first_tuple)/fs,frequency_hz=residual,
-            total_frequency_hz=center_hint_hz+frequency,phase_deg=float(np.angle(gain,deg=True)),evm_percent=pilot_error)
+            total_frequency_hz=center_hint_hz+frequency,phase_deg=float(np.angle(gain,deg=True)),evm_percent=pilot_error,
+            conjugated=fitted['conjugated'],expected_hex=[f'{int(v):02X}' for v in decide(points,order)[1]])
+        for j,value in enumerate(normalized_pilot):
+            training_records.append(dict(frame=0,training_index=j,time_s=float((centres[at+j]+spectrum.first_tuple)/fs),
+                expected_hex=pilot['expected_hex'][j],observed_hex=f'{int(decide(np.array([value]),order)[1][0]):02X}',
+                normalized_i=float(value.real),normalized_q=float(value.imag),training_passed=True,
+                conjugated=fitted['conjugated'],evm_percent=pilot_error))
         coefficients,centres = coefficients[first:],centres[first:]
     elif options['normalization'] == 'pwm':
         radius = math.sqrt(2)*(math.isqrt(order)-1)/math.sqrt(2*(order-1)/3)
@@ -238,9 +275,12 @@ def recover_tdcm(spectrum, *, duration_s=1, center_hint_hz=-200000, symbol_hz=19
         calibration_note='已知QAM训练' if pilot is not None else
                          'PWM两态模型：假定方形QAM最远角点对应所选谐波理论最大幅度' if options['normalization']=='pwm' else
                          '盲RMS/静态相位归一化，存在90°相位歧义')
-    return SimpleNamespace(kind='qam',carrier_hz=center_hint_hz,order=order,symbol_hz=symbol_hz,
+    result=SimpleNamespace(kind='qam',carrier_hz=center_hint_hz,order=order,symbol_hz=symbol_hz,
         scatter=z,ideal=ideal,labels=labels,bits=bits,evm_percent=evm,
         time_s=(centres+spectrum.first_tuple)/fs,first_tuple=spectrum.first_tuple,
         input_samples=count,clipped=clipped,cutoff_hz=symbol_hz/2,decimation=1,
         output_rate_hz=symbol_hz,preamble=pilot,pwm_preamble=sync,tdcm=details,
-        coefficients=coefficients,raw_coefficients=original_coefficients)
+        coefficients=coefficients,raw_coefficients=original_coefficients,training_records=training_records)
+
+    from rx706_qam_payload import attach_payload_debug
+    return attach_payload_debug(result)

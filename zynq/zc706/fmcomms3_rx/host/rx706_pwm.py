@@ -1085,6 +1085,11 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
                                                   result.symbol_bitwords, cancel_event)
         result.reference_check = result.frame_check
         result.decoded_bit_rate = valid_count*pulse_options['information_bits']/measured_duration
+        ambiguous = pulse_options.get('sync_ambiguous_blocks', 0)
+        unidentified = sum(not c.get('model_identifiable', False) for c in pulse_calibrations)
+        result.sampling_note += (f' 前导位置歧义{ambiguous}块（净荷保位擦除）；'
+                                f'单宽前导{unidentified}块只估计偏置，宽度增益不可辨识。'
+                                '多宽前导使用仿射宽度校准，参数仅来自已知前导。')
         result.training_calibration = dict(training_symbols=int(frames['training'].sum()),
             updates=len(pulse_calibrations), corrections_chips=[], starts_s=[], target_duty_percent=None,
             preamble_widths=None, payload_symbols=0, auto_scale=False, clock_width=True,

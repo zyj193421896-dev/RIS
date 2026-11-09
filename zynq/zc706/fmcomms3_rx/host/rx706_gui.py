@@ -519,6 +519,9 @@ class Rx706App:
                 from rx706_spectrum_gui import SpectrumWindow
                 filename = self.last_download or self.output.get().strip()
                 self.spectrum_window = SpectrumWindow(self.root, filename)
+                self.spectrum_window.qam_order.set(str(getattr(self,'analysis_qam_order',256)))
+                self.spectrum_window.qam_crc_enabled.set(bool(getattr(self,'analysis_crc_debug',False)))
+                self.spectrum_window.qam_extra_tail_symbols.set(str(getattr(self,'analysis_tail_symbols',0)))
             self.spectrum_window.window.deiconify()
             self.spectrum_window.window.lift()
         except ImportError as exc:
@@ -641,9 +644,73 @@ class Rx706App:
         self.root.destroy()
 
 
+def parse_launch_args(argv=None):
+    import argparse
+    parser=argparse.ArgumentParser(description='RX706采集与本地信号分析')
+    modes=parser.add_mutually_exclusive_group()
+    modes.add_argument('--qam256-120k-frame',action='store_true',help='256QAM：120 kHz/K=1/64片25%前导；3+4+16明文帧，不连接板卡')
+    modes.add_argument('--qam256-120k-legacy-frame',action='store_true',help='保留旧256QAM 120k 3+8+128重复帧')
+    modes.add_argument('--paired-64-frame',action='store_true',help='64QAM当前帧：3PWM+两遍四角+128物理净荷；保留64重复对，不自动合并')
+    modes.add_argument('--four-corner-training',action='store_true',help='打开3PWM＋四角QAM训练分析界面；不连接板卡')
+    parser.add_argument('--qam-order',type=int,choices=(16,64,256),default=None,help='本地分析默认QAM阶数，默认256')
+    parser.add_argument('--payload-symbols',type=int,default=None,help='实际每帧净荷symbol数；64QAM须明确提供，不能由阶数推断')
+    parser.add_argument('--ready-file',default='',help='可选：写出本次GUI就绪状态JSON')
+    parser.add_argument('--crc-debug',action='store_true',help='预留CRC/帧尾调试；参数未知时只显示未验证')
+    parser.add_argument('--tail-symbols',type=int,default=0,help='每帧手动配置的额外尾符号数，默认0；不自动认定CRC')
+    args=parser.parse_args(argv)
+    if args.qam_order is None:args.qam_order=64 if args.paired_64_frame else 256
+    if args.qam256_120k_frame and args.crc_debug:parser.error('当前3+4+16帧明确无CRC，不启用CRC调试')
+    if args.qam256_120k_frame or args.qam256_120k_legacy_frame:
+        count=16 if args.qam256_120k_frame else 128
+        structure='3+4+16' if args.qam256_120k_frame else '3+8+128'
+        if args.qam_order!=256:parser.error('120k-frame须使用256QAM')
+        if args.payload_symbols not in (None,count):parser.error(f'该帧固定{count}物理净荷；其他长度使用通用训练模式')
+        if args.tail_symbols!=0:parser.error(f'该{structure}帧无额外尾部；其他帧使用通用训练模式')
+        args.payload_symbols=count
+    if args.paired_64_frame and args.qam_order!=64:parser.error('paired-64-frame须使用64QAM')
+    if args.paired_64_frame:
+        if args.payload_symbols not in (None,128):parser.error('当前成对帧固定128个物理净荷符号，其他长度使用通用训练模式')
+        args.payload_symbols=128
+    if not 0<=args.tail_symbols<=4096:parser.error('tail-symbols须为0～4096，不能用未知CRC猜长度')
+    if args.four_corner_training and args.qam_order!=256 and args.payload_symbols is None:
+        parser.error('64/16QAM四角训练须明确指定--payload-symbols实际每帧净荷数')
+    if args.payload_symbols is None:args.payload_symbols=256
+    if not 1<=args.payload_symbols<=65532:parser.error('payload-symbols须为1～65532')
+    return args
+
+
 def main():
+    args=parse_launch_args()
     root = tk.Tk()
-    Rx706App(root)
+    app=Rx706App(root);app.analysis_qam_order=args.qam_order;app.analysis_crc_debug=args.crc_debug;app.analysis_tail_symbols=args.tail_symbols
+    if args.four_corner_training or args.paired_64_frame or args.qam256_120k_frame or args.qam256_120k_legacy_frame:
+        app.open_spectrum();view=app.spectrum_window
+        view.filename.set('');view.qam_order.set(str(args.qam_order));view.four_corner_payload.set(str(args.payload_symbols))
+        view.qam_compensation.values['frame_symbols'].set(str(args.payload_symbols))
+        view.qam_extra_tail_symbols.set(str(args.tail_symbols));view.qam_crc_enabled.set(args.crc_debug)
+        (view.apply_qam256_120k_frame_profile if args.qam256_120k_frame else
+         view.apply_qam256_120k_legacy_frame_profile if args.qam256_120k_legacy_frame else
+         view.apply_paired_64_frame_profile if args.paired_64_frame else view.apply_four_corner_training_profile)()
+        view.qam_compensation.auto_open.set(True)
+        view.qam_crc_enabled.set(args.crc_debug)
+        if args.qam_order==256 and not (args.qam256_120k_frame or args.qam256_120k_legacy_frame):view.tdcm_carrier_mhz.set('0.8')
+        view.window.title('RX706 · 64QAM · 3+4+4+128 · 物理符号/重复对' if args.paired_64_frame else f'RX706 · {args.qam_order}QAM · 3PWM＋四角训练 · HEX净荷')
+        if args.qam256_120k_frame:view.window.title('RX706 · 256QAM · 120 kHz / 64片 / 3+4+16明文')
+        if args.qam256_120k_legacy_frame:view.window.title('RX706 · 256QAM · 120 kHz / 64片 / 旧3+8+128')
+    if args.ready_file:
+        def ready():
+            from pathlib import Path
+            import json
+            view=app.spectrum_window
+            state=dict(source=__file__,connected=app.connected,root_visible=bool(root.winfo_viewable()),
+                analysis_visible=bool(view and view.window.winfo_viewable()),
+                analysis_title=view.window.title() if view else None,
+                input_file=view.filename.get() if view else None,
+                qam_order=view.qam_order.get() if view else None,
+                qam_windows=view.qam_compensation.values['frame_symbols'].get() if view else None,
+                training=view.qam_preamble_symbols.get() if view else None)
+            Path(args.ready_file).write_text(json.dumps(state,ensure_ascii=False,indent=2))
+        root.after(500,ready)
     root.mainloop()
 
 

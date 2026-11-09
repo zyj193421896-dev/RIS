@@ -178,22 +178,35 @@ class PortableTests(unittest.TestCase):
         self.assertFalse(any('numpy' in name or 'spectrum' in name or 'frame_profiles' in name for name in expected))
 
     def test_capture_gui_has_no_analysis_entry(self):
-        try:
-            root = tk.Tk()
-        except tk.TclError as exc:
-            self.skipTest(str(exc))
-        root.withdraw()
-        gui = load('portable_gui', self.stage/'capture_gui.py')
-        app = gui.CaptureApp(root)
-        try:
-            self.assertFalse(app.spectrum_button.winfo_exists())
-            self.assertTrue(str(app.output.get()).startswith(str(self.stage/'captures')))
-            self.assertNotIn('rx706_spectrum_gui', sys.modules)
-            self.assertNotIn('numpy', sys.modules)
-        finally:
-            app.controller.close()
-            app.controller.thread.join(timeout=2)
-            app.destroy()
+        # Discovery imports the analysis suites in this process. Verify the
+        # capture-only distribution in a fresh interpreter, as users launch it.
+        code = r"""
+from pathlib import Path
+import sys
+import tkinter as tk
+sys.path.insert(0, sys.argv[1])
+from capture_gui import CaptureApp
+try:
+    root = tk.Tk()
+except tk.TclError as exc:
+    print(str(exc)); raise SystemExit(77)
+root.withdraw()
+app = CaptureApp(root)
+try:
+    assert not app.spectrum_button.winfo_exists()
+    assert str(app.output.get()).startswith(str(Path(sys.argv[1])/'captures'))
+    assert 'rx706_spectrum_gui' not in sys.modules
+    assert 'numpy' not in sys.modules
+finally:
+    app.controller.close()
+    app.controller.thread.join(timeout=2)
+    app.destroy()
+"""
+        result = subprocess.run([sys.executable, '-I', '-c', code, str(self.stage)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode == 77:
+            self.skipTest(result.stdout.strip())
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
 
 if __name__ == '__main__':

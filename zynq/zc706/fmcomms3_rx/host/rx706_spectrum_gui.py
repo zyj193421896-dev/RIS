@@ -14,10 +14,15 @@ PWM_MODES = (PWM_MODE, PWM2_MODE)
 QAM_MODE = "QAM 解调"
 QAM_PWM_MODE = "PWM前导 + QAM"
 TDCM_MODE = "TDCM 谐波QAM"
-QAM_MODES = (TDCM_MODE,)
-RECOVERY_MODES = (PWM_MODE, PWM2_MODE, TDCM_MODE)
+FOUR_CORNER_MODE = "QAM：3PWM＋四角训练"
+PAIRED_64_MODE = "64QAM：3PWM＋双遍四角＋成对净荷"
+QAM256_120K_MODE = "256QAM：120k／64片／3+4+16"
+QAM256_120K_LEGACY_MODE = "256QAM：120k／64片／旧3+8+128"
+TDCM_MODES = (TDCM_MODE,FOUR_CORNER_MODE,PAIRED_64_MODE,QAM256_120K_MODE,QAM256_120K_LEGACY_MODE)
+QAM_MODES = (QAM_MODE, QAM_PWM_MODE, *TDCM_MODES)
+RECOVERY_MODES = (RECOVERY_MODE, PWM_MODE, PWM2_MODE, *QAM_MODES)
 MODE_KINDS = {RECOVERY_MODE: 'periodic', PWM_MODE: 'pwm', PWM2_MODE: 'pwm2',
-              QAM_MODE: 'qam', QAM_PWM_MODE: 'qam', TDCM_MODE: 'qam'}
+              QAM_MODE: 'qam', QAM_PWM_MODE: 'qam', TDCM_MODE: 'qam',FOUR_CORNER_MODE:'qam',PAIRED_64_MODE:'qam',QAM256_120K_MODE:'qam',QAM256_120K_LEGACY_MODE:'qam'}
 PLOT_NAMES = ("总览", "频谱", "星座", "IQ 波形", "PWM 包络")
 PWM150_PRESET = '150k：净荷24%～72%，前导24%×3'
 PWM170_PRESET = '169.971671k：20%步长7%，8档温度计码'
@@ -40,9 +45,11 @@ class SpectrumWindow:
         self.thread = None
         self.result = None
         self.recovery = None
+        self._next_qam_recipe = None
         self._open_pwm_after_analysis = False
         self._pwm_dialog = None
         self._pwm_dialog_result = None
+        self._qam_report = None
         self.poll_after = None
         self.filename = tk.StringVar(value=str(filename))
         self.channel = tk.StringVar(value="RX1")
@@ -56,6 +63,12 @@ class SpectrumWindow:
         self.recovery_ms = tk.StringVar(value="1000")
         self.center_hint = tk.StringVar(value="自动")
         self.qam_order = tk.StringVar(value="256")
+        self._last_qam_order = 256
+        self.four_corner_payload = tk.StringVar(value="")
+        self.qam_training_repeats = tk.StringVar(value="1")
+        self.qam_payload_repeat = tk.StringVar(value="1")
+        self.qam_extra_tail_symbols = tk.StringVar(value="0")
+        self.qam_crc_enabled = tk.BooleanVar(value=False)
         self.qam_symbol_khz = tk.StringVar(value="100")
         self.qam_rolloff = tk.StringVar(value="0.35")
         self.qam_pulse = tk.StringVar(value="RRC")
@@ -66,6 +79,8 @@ class SpectrumWindow:
         self.qam_preamble_frequency_khz = tk.StringVar(value="1")
         self.qam_preamble_evm = tk.StringVar(value="10")
         self.qam_preamble_search_ms = tk.StringVar(value="1000")
+        self.qam_training_orientation = tk.StringVar(value='不共轭（原流程）')
+        self.qam_training_offset = tk.BooleanVar(value=False)
         self.qam_pwm_symbols = tk.StringVar(value="0 0 0")
         self.qam_pwm_gap_us = tk.StringVar(value="0")
         self.qam_pwm_search_ms = tk.StringVar(value="1000")
@@ -109,6 +124,8 @@ class SpectrumWindow:
         self.pwm_joint_delay = tk.BooleanVar(value=True)
         self.pwm_low_guard_chips = tk.StringVar(value='1')
         self.pwm_pulse_codebook = tk.StringVar(value='')
+        self.pwm_pulse_tolerance = tk.StringVar(value='0.4')
+        self.pwm_nearest_decision = tk.BooleanVar(value=True)
         self.pwm_duty_summary = tk.StringVar()
         self.pwm_auto_search = tk.BooleanVar(value=True)
         self.pwm_code_chips = tk.StringVar(value="8")
@@ -181,6 +198,8 @@ class SpectrumWindow:
         ttk.Button(bar, text="全屏 (F11)", command=self.toggle_fullscreen).pack(side="left", padx=(0, 12))
         self.pwm_symbols_button = ttk.Button(bar, text="PWM 符号表 / 比特流…", command=self.show_pwm_symbols)
         self.pwm_symbols_button.pack(side="left", padx=(0, 10))
+        self.qam_report_button = ttk.Button(bar, text="QAM 解调诊断…", command=self.show_qam_report)
+        self.qam_report_button.pack(side="left", padx=(0, 10))
         ttk.Label(bar, text="滚轮缩放 · 拖动平移 · 双击放大/返回").pack(side="left")
         ttk.Label(outer, textvariable=self.brief_status, foreground="#24486c", anchor="w").pack(fill="x", pady=(0, 4))
         self.panes = ttk.Panedwindow(outer, orient="horizontal")
@@ -195,6 +214,17 @@ class SpectrumWindow:
         details = ttk.Frame(notebook)
         notebook.add(parameters, text="分析参数")
         notebook.add(details, text="统计 / 状态")
+        from rx706_qam_debug_gui import CompensationControls
+        compensation_tab = ttk.Frame(notebook)
+        notebook.add(compensation_tab, text="QAM 补偿（64 / 256）")
+        self.qam_compensation = CompensationControls(compensation_tab,self.apply_qam_debug_profile,
+            dict(normalization=self.tdcm_normalization,amplitude=self.tdcm_amplitude,phase=self.tdcm_phase,
+                 training_enabled=self.qam_preamble_enabled,training_format=self.qam_preamble_format,
+                 training_symbols=self.qam_preamble_symbols,training_evm=self.qam_preamble_evm,
+                 training_frequency=self.qam_preamble_frequency_khz,training_orientation=self.qam_training_orientation,
+                 training_offset=self.qam_training_offset,order=self.qam_order),recipe_callback=self.load_qam_recipe,search_callback=self.activate_qam_auto_search,
+                 training_profile_callback=self.apply_four_corner_training_profile,paired_profile_callback=self.apply_paired_64_frame_profile,save_bound_callback=self.save_iq_bound_recipe)
+        self.controls.extend(self.qam_compensation.widgets)
         self.info_text = scrolledtext.ScrolledText(details, wrap="word", width=32, state="disabled", font="TkDefaultFont")
         self.info_text.pack(fill="both", expand=True)
         self.parameter_canvas = tk.Canvas(parameters, highlightthickness=0, width=340)
@@ -212,12 +242,12 @@ class SpectrumWindow:
         self._advanced_fields = []
         mode_groups = {
             '载波恢复设置': RECOVERY_MODES,
-            'QAM 解调设置': (QAM_MODE, QAM_PWM_MODE),
+            'QAM 解调设置': QAM_MODES,
             'QAM：可配置前导 / 导频': QAM_MODES,
-            '混合模式：PWM前导 + QAM': (QAM_PWM_MODE, TDCM_MODE),
-            'TDCM：按谐波复系数解调': (TDCM_MODE,),
-            'PWM 脉宽与信息解调': (*PWM_MODES, QAM_PWM_MODE, TDCM_MODE),
-            'PWM version2：协议与映射': (PWM2_MODE, QAM_PWM_MODE, TDCM_MODE),
+            '混合模式：PWM前导 + QAM': (QAM_PWM_MODE, *TDCM_MODES),
+            'TDCM：按谐波复系数解调': TDCM_MODES,
+            'PWM 脉宽与信息解调': (*PWM_MODES, QAM_PWM_MODE, *TDCM_MODES),
+            'PWM version2：协议与映射': (PWM2_MODE, QAM_PWM_MODE, *TDCM_MODES),
             'version2：前导与恢复': (PWM2_MODE,),
             '已知循环校验 / BER': PWM_MODES,
             '最简帧：公共训练与用户数据': (PWM2_MODE,),
@@ -254,6 +284,11 @@ class SpectrumWindow:
                                  command=self.refresh_parameter_visibility)
         toggle.grid(row=2, column=0, columnspan=2, sticky='w')
         self.controls.append(toggle)
+        for row, label, action in ((3, '载入PWM IQ绑定JSON并分析…', self.load_pwm_recipe),
+                                   (4, '保存本次PWM IQ绑定JSON…', self.save_pwm_recipe)):
+            widget = ttk.Button(box, text=label, command=action)
+            widget.grid(row=row, column=0, columnspan=2, sticky='ew', pady=3)
+            self.controls.append(widget)
         box = group("采样与频谱")
         field(box, "通道", self.channel, ("RX1", "RX2"))
         field(box, "FFT 点数", self.nfft, tuple(str(1 << p) for p in range(8, 21)), advanced=True)
@@ -270,17 +305,25 @@ class SpectrumWindow:
         field(box, "恢复时长 (ms)", self.recovery_ms)
         field(box, "基带载波 (MHz / 自动)", self.center_hint, advanced=True)
         box = group("QAM 解调设置")
-        field(box, "QAM阶数", self.qam_order, ("16", "64", "256"))
+        field(box, "QAM阶数", self.qam_order, ("16", "64", "256"), self.on_qam_order_changed)
         field(box, "符号率 (kSym/s)", self.qam_symbol_khz)
         field(box, "基带载波频偏 (MHz)", self.qam_carrier_mhz)
         field(box, "发端脉冲形状", self.qam_pulse, ("RRC", "Rectangular"))
         field(box, "RRC滚降系数", self.qam_rolloff)
         ttk.Label(box, text="载波已居中填0；参数须与发端一致。静态相位/定时估计，存在90°歧义，未测BER。", wraplength=290).grid(row=5, column=0, columnspan=2)
+        field(box, "四角训练每帧物理净荷数", self.four_corner_payload)
+        field(box, "四角预设训练遍数", self.qam_training_repeats,('1','2'))
+        field(box, "净荷连续重复数", self.qam_payload_repeat,('1','2'))
+        field(box, "每帧额外尾符号数", self.qam_extra_tail_symbols)
+        row=box.grid_size()[1]
+        crc=ttk.Checkbutton(box,text='CRC / TDCM帧尾调试（默认关闭）',variable=self.qam_crc_enabled)
+        crc.grid(row=row,column=0,columnspan=2,sticky='w');self.controls.append(crc)
+        ttk.Label(box,text='CRC参数未知时只显示未验证；不猜算法、不判通过/失败。尾部长度须观察后手动填写，原始物理符号保留。',wraplength=290).grid(row=row+1,column=0,columnspan=2,sticky='w')
         box = group("QAM：可配置前导 / 导频")
         pilot = ttk.Checkbutton(box, text="启用已知前导同步与频偏校正", variable=self.qam_preamble_enabled)
         pilot.grid(row=0, column=0, columnspan=2, sticky="w")
         self.controls.append(pilot)
-        field(box, "前导表示方式", self.qam_preamble_format, ("符号值（Gray）", "I/Q电平"))
+        field(box, "前导表示方式", self.qam_preamble_format, ("符号值（Gray）", "HEX字节（00–FF）", "I/Q电平"))
         field(box, "前导序列（空格分隔）", self.qam_preamble_symbols)
         field(box, "残余频偏范围 ±kHz", self.qam_preamble_frequency_khz)
         field(box, "前导匹配EVM上限 (%)", self.qam_preamble_evm)
@@ -349,6 +392,12 @@ class SpectrumWindow:
         codebook.grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='ew', pady=4)
         self._pulse_fields.append(codebook)
         self.controls.append(codebook)
+        entry = field(box, '码字边沿容差 (片)', self.pwm_pulse_tolerance)
+        self._pulse_fields.extend(box.grid_slaves(row=entry.grid_info()['row']))
+        nearest = ttk.Checkbutton(box, text='超容差仍输出最近码字估计', variable=self.pwm_nearest_decision)
+        nearest.grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='w')
+        self._pulse_fields.append(nearest)
+        self.controls.append(nearest)
         for variable in (self.pwm_duty_start, self.pwm_duty_step, self.pwm_duty_count,
                          self.pwm_min_high_chips, self.pwm_joint_delay, self.pwm_pulse_codebook):
             variable.trace_add('write', lambda *args: self.update_duty_summary())
@@ -388,7 +437,7 @@ class SpectrumWindow:
         self._time_protocol_fields = [w for w in box.winfo_children() if int(w.grid_info()['row']) > 0]
         ttk.Label(box, textvariable=self.pwm2_layout_summary, wraplength=290).grid(row=8, column=0, columnspan=2, sticky='w')
         for variable in (self.pwm2_total_chips, self.pwm2_prefix_chips, self.pwm2_guard_chips,
-                         self.pwm_symbol_khz, self.rate, self.pwm_decimation):
+                         self.pwm_symbol_khz, self.tdcm_pwm_khz, self.constellation_mode, self.rate, self.pwm_decimation):
             variable.trace_add('write', lambda *args: self.update_pwm2_layout())
         self.update_pwm2_layout()
         box = group("version2：前导与恢复")
@@ -456,6 +505,9 @@ class SpectrumWindow:
         self.pwm_frame_enabled.trace_add('write', lambda *args: (self.refresh_parameter_visibility(), self.update_duty_summary()))
         for variable in (self.pwm_frame_user_count, self.pwm_frame_startup_count, self.pwm_frame_training_count):
             variable.trace_add('write', lambda *args: self.update_duty_summary())
+        self._geometry_family = 'qam' if self.constellation_mode.get() in QAM_MODES else 'pwm'
+        self._geometry_saved = {}
+        self.constellation_mode.trace_add('write', self._on_geometry_mode_changed)
         self.refresh_parameter_visibility()
         self.parameter_footer = ttk.Label(body, text="采样率优先使用文件同名JSON。修改参数后点分析；详细指标在“统计 / 状态”。", wraplength=300)
         self.parameter_footer.pack(fill="x")
@@ -510,7 +562,9 @@ class SpectrumWindow:
         self.info_text.delete("1.0", "end")
         self.info_text.insert("1.0", text)
         self.info_text.configure(state="disabled")
-        if "未锁定" in self.status.get() or "失败" in self.status.get():
+        if self.busy:
+            brief = self.status.get().splitlines()[0]
+        elif "未锁定" in self.status.get() or "失败" in self.status.get():
             brief = self.status.get().splitlines()[-1]
         elif self.recovery is not None:
             r = self.recovery
@@ -669,8 +723,9 @@ class SpectrumWindow:
             ax.clear()
             ax.grid(alpha=.25)
         z = r.scatter
-        step = max(1,len(z)//20000)
-        self.iq_axes.scatter(z.real[::step], z.imag[::step], s=3, alpha=.3)
+        from rx706_qam_debug_gui import scatter_indices
+        selected = scatter_indices(len(z),budget=20000,labels=r.labels)
+        self.iq_axes.scatter(z.real[selected], z.imag[selected], s=3, alpha=.3)
         grid = np.unique(r.ideal)
         self.iq_axes.plot(grid.real, grid.imag, 'rx', ms=4)
         prefix = f"TDCM {r.tdcm['harmonic']:+d} | " if getattr(r,'tdcm',None) is not None else ''
@@ -683,8 +738,24 @@ class SpectrumWindow:
         self.wave_axes.legend(fontsize=7)
         self._plots_changed()
 
+    def _on_geometry_mode_changed(self, *args):
+        """Keep standalone PWM geometry separate from known QAM headers."""
+        family = 'qam' if self.constellation_mode.get() in QAM_MODES else 'pwm'
+        if family != self._geometry_family:
+            variables = (self.pwm2_total_chips, self.pwm2_prefix_chips, self.pwm2_guard_chips)
+            self._geometry_saved[self._geometry_family] = tuple(v.get() for v in variables)
+            self._geometry_family = family
+            saved = self._geometry_saved.get(family)
+            if saved is not None:
+                for variable, value in zip(variables, saved):
+                    variable.set(value)
+        self.refresh_parameter_visibility()
+        self.update_pwm2_layout()
+
     def refresh_parameter_visibility(self):
         """Show only settings used by the selected demodulator."""
+        if not hasattr(self, '_parameter_groups'):
+            return
         mode, advanced = self.constellation_mode.get(), self.show_advanced.get()
         for box, modes in self._parameter_groups:
             box.pack_forget()
@@ -718,7 +789,7 @@ class SpectrumWindow:
         for widget in self._simple_pwm_fields:
             widget.grid() if simple else widget.grid_remove()
         for widget in self._time_protocol_fields:
-            if self.pwm2_input_mode.get() != '时间片协议':
+            if mode == PWM2_MODE and self.pwm2_input_mode.get() != '时间片协议':
                 widget.grid_remove()
             elif widget not in self._mapping_fields or self.pwm2_mapping.get() == '自定义高片数表':
                 widget.grid()
@@ -733,6 +804,9 @@ class SpectrumWindow:
             self.parameter_footer.pack(fill='x')
 
     def update_duty_summary(self):
+        if self.constellation_mode.get() != PWM2_MODE:
+            self.update_pwm2_layout()
+            return
         from rx706_pwm_protocol import duty_protocol
         try:
             if self.pwm2_input_mode.get() == '脉冲宽度与时延':
@@ -876,6 +950,9 @@ class SpectrumWindow:
             low_guard_chips=int(self.pwm_low_guard_chips.get()),
             joint_delay=self.pwm_joint_delay.get(),
             codebook=self.pwm_pulse_codebook.get(), frame_options=self.frame_config())
+        if hasattr(self, 'pwm_pulse_tolerance'):
+            config['tolerance_chips'] = float(self.pwm_pulse_tolerance.get())
+            config['nearest_decision'] = self.pwm_nearest_decision.get()
         return validate_pulse_options(config, float(self.pwm_symbol_khz.get())*1000)
 
     def configure_pulse_codebook(self):
@@ -1124,11 +1201,12 @@ class SpectrumWindow:
 
     def update_pwm2_layout(self):
         from rx706_pwm import pwm2_layout
+        from rx706_qam_pwm import pwm_header_layout
         try:
-            if self.pwm2_input_mode.get() == '脉冲宽度与时延':
+            if self.constellation_mode.get() == PWM2_MODE and self.pwm2_input_mode.get() == '脉冲宽度与时延':
                 self.update_duty_summary()
                 return
-            if self.pwm2_input_mode.get() == '占空比范围':
+            if self.constellation_mode.get() == PWM2_MODE and self.pwm2_input_mode.get() == '占空比范围':
                 from rx706_pwm_protocol import duty_protocol
                 import math
                 _, duties = duty_protocol(self.pwm_duty_start.get(), self.pwm_duty_step.get(), self.pwm_duty_count.get())
@@ -1138,7 +1216,8 @@ class SpectrumWindow:
                 return
             total, prefix, guard = (int(v.get()) for v in
                 (self.pwm2_total_chips, self.pwm2_prefix_chips, self.pwm2_guard_chips))
-            code = pwm2_layout(total, prefix, guard)
+            header = self.constellation_mode.get() in QAM_MODES
+            code = (pwm_header_layout if header else pwm2_layout)(total, prefix, guard)
             preset = {'20片：8+10+2': (20, 8, 2), '50片：20+25+5': (50, 20, 5),
                       '50片：8+40+2': (50, 8, 2), PWM150_PRESET: (25, 6, 7)}.get(self.pwm2_preset.get())
             if preset is not None and preset != (total, prefix, guard):
@@ -1146,29 +1225,68 @@ class SpectrumWindow:
             text = (f'合法高片数{prefix}～{total-guard}；默认符号=高片数−{prefix}。'
                     f'{prefix}+{code}+{guard}={total}片；{code+1}态，k=0～{code}。'
                     f'占空比{100*prefix/total:g}%～{100*(total-guard)/total:g}%，步进{100/total:g}%。')
-            fs, symbol, decimation = float(self.rate.get())*1e6, float(self.pwm_symbol_khz.get())*1000, int(self.pwm_decimation.get())
+            if header and code == 0:text += ' 固定已知前导，不用于独立PWM v2数据解调。'
+            rate = self.tdcm_pwm_khz if self.constellation_mode.get() in TDCM_MODES else self.pwm_symbol_khz
+            fs, symbol = float(self.rate.get())*1e6, float(rate.get())*1000
+            decimation = 1 if header else int(self.pwm_decimation.get())
             if fs > 0 and symbol > 0 and decimation > 0:
                 points = fs/(symbol*total*decimation)
                 text += f' 每片{points:.3f}个处理点。'
-                if points < 3:
-                    text += '不足3点，请降低符号率或抽取倍数。'
+                minimum = 2 if header else 3
+                if points < minimum:
+                    text += f'不足{minimum}点，请降低符号率或抽取倍数。'
                 elif points < 4:
                     text += '低于建议4点，计时余量较小。'
             self.pwm2_layout_summary.set(text)
         except (ValueError, ZeroDivisionError) as exc:
             self.pwm2_layout_summary.set(f'参数待检查：{exc}')
 
+    def on_qam_order_changed(self, event=None):
+        from rx706_qam_profiles import four_corner_training_hex
+        order=int(self.qam_order.get());old=getattr(self,'_last_qam_order',256)
+        # Only a generated preset may be translated. User training is never
+        # guessed or truncated to fit another alphabet.
+        if (getattr(self,'_four_corner_profile_order',None)==old and
+                self.qam_preamble_format.get()=='HEX字节（00–FF）' and
+                self.qam_preamble_symbols.get().upper()==four_corner_training_hex(old,int(self.qam_training_repeats.get()))):
+            self.qam_preamble_symbols.set(four_corner_training_hex(order,int(self.qam_training_repeats.get())))
+            self._four_corner_profile_order=order
+        self._last_qam_order=order;self._next_qam_recipe=None
+        if self.constellation_mode.get()==PAIRED_64_MODE and order!=64:self.constellation_mode.set(TDCM_MODE)
+        self.status.set(f'已选择{order}QAM；训练、符号率和帧长须与发端一致，修改后重新分析。')
+        if self.recovery is not None and getattr(self.recovery,'order',order)!=order:
+            self.recovery=None;self.draw_constellation();self.canvas.draw_idle()
+
     def on_mode_changed(self, event=None):
         if self.closed or self.busy:
             return
-        self.refresh_parameter_visibility()
+        if hasattr(self, '_parameter_groups'):
+            self.refresh_parameter_visibility()
+            self.update_pwm2_layout()
+        if self.constellation_mode.get() in (QAM256_120K_MODE,QAM256_120K_LEGACY_MODE):
+            apply = self.apply_qam256_120k_frame_profile if self.constellation_mode.get()==QAM256_120K_MODE else self.apply_qam256_120k_legacy_frame_profile
+            if apply() is False:return
+            if self.filename.get().strip():self.analyze()
+            return
+        if self.constellation_mode.get()==PAIRED_64_MODE:
+            if self.apply_paired_64_frame_profile() is False:return
+            if self.filename.get().strip():self.analyze()
+            return
+        if self.constellation_mode.get()==FOUR_CORNER_MODE:
+            if self.apply_four_corner_training_profile() is False:return
+            if self.filename.get().strip():self.analyze()
+            return
         expected_kind = MODE_KINDS.get(self.constellation_mode.get())
         wrong_header = (expected_kind == 'qam' and self.recovery is not None and
-                        (self.constellation_mode.get() in (QAM_PWM_MODE,TDCM_MODE)) !=
+                        (self.constellation_mode.get() == QAM_PWM_MODE or
+                         (self.constellation_mode.get() in TDCM_MODES and self.qam_compensation.acquisition_options()=='pwm')) !=
                         (getattr(self.recovery, 'pwm_preamble', None) is not None))
         wrong_tdcm = (expected_kind == 'qam' and self.recovery is not None and
-                      (self.constellation_mode.get() == TDCM_MODE) != (getattr(self.recovery,'tdcm',None) is not None))
+                      (self.constellation_mode.get() in TDCM_MODES) != (getattr(self.recovery,'tdcm',None) is not None))
         if self.constellation_mode.get() in RECOVERY_MODES and (self.recovery is None or self.recovery.kind != expected_kind or wrong_header or wrong_tdcm):
+            if self.constellation_mode.get() in QAM_MODES:
+                self.analyze()
+                return
             self.status.set('已切换模式；核对当前参数后点击“分析信号”。')
             if self.result is not None:
                 self.draw_constellation()
@@ -1263,7 +1381,16 @@ class SpectrumWindow:
                 first_tuple=int(self.first_tuple.get()), sample_rate_hz=float(self.rate.get()) * 1e6,
                 remove_dc=self.remove_dc.get())
             recovery_options = None
-            if self.constellation_mode.get() in RECOVERY_MODES:
+            bound = getattr(self,'_next_iq_bound_recipe',None)
+            replay = getattr(self,'_next_qam_recipe',None)
+            if bound is not None:
+                self._next_iq_bound_recipe = None
+                options = dict(bound['spectrum'])
+                recovery_options = dict(kind='qam', _iq_bound_recipe=bound, **bound['recovery'])
+            elif replay is not None:
+                self._next_qam_recipe = None
+                recovery_options = dict(kind='qam',tdcm_options=dict(replay_recipe=replay))
+            elif self.constellation_mode.get() in RECOVERY_MODES:
                 center = self.center_hint.get().strip()
                 recovery_options = dict(duration_s=float(self.recovery_ms.get())/1000,
                     center_hint_hz=None if center.lower() in ('自动', 'auto', '') else float(center)*1e6)
@@ -1272,25 +1399,30 @@ class SpectrumWindow:
                         symbol_hz=float(self.qam_symbol_khz.get())*1000,
                         rolloff=float(self.qam_rolloff.get()), pulse=self.qam_pulse.get(),
                         center_hint_hz=float(self.qam_carrier_mhz.get())*1e6)
-                    if self.constellation_mode.get() == TDCM_MODE:
+                    if self.constellation_mode.get() in TDCM_MODES:
                         recovery_options.update(symbol_hz=float(self.tdcm_symbol_khz.get())*1000,
                             center_hint_hz=float(self.tdcm_carrier_mhz.get())*1e6)
                     if self.qam_preamble_enabled.get():
                         from rx706_qam_preamble import validate_preamble
                         preamble = dict(symbols=self.qam_preamble_symbols.get(),
-                            representation='iq' if self.qam_preamble_format.get() == 'I/Q电平' else 'labels',
+                            representation='iq' if self.qam_preamble_format.get() == 'I/Q电平' else 'hex' if self.qam_preamble_format.get()=='HEX字节（00–FF）' else 'labels',
                             max_frequency_hz=float(self.qam_preamble_frequency_khz.get())*1000,
                             max_evm_percent=float(self.qam_preamble_evm.get()),
-                            search_s=float(self.qam_preamble_search_ms.get())/1000)
+                            search_s=float(self.qam_preamble_search_ms.get())/1000,
+                            orientation={'不共轭（原流程）':'normal','自动辨识I/Q镜像':'auto','固定共轭':'conjugate'}[self.qam_training_orientation.get()],
+                            fit_dc_offset=self.qam_training_offset.get())
                         validate_preamble(preamble, recovery_options['order'], recovery_options['symbol_hz'])
+                        if self.constellation_mode.get() not in TDCM_MODES and (preamble['orientation']!='normal' or preamble['fit_dc_offset']):
+                            raise ValueError('镜像/零点训练校准用于TDCM谐波QAM；普通QAM请使用原训练方式')
                         recovery_options['preamble_options'] = preamble
-                    if self.constellation_mode.get() in (QAM_PWM_MODE,TDCM_MODE):
+                    if (self.constellation_mode.get() == QAM_PWM_MODE or
+                            (self.constellation_mode.get() in TDCM_MODES and self.qam_compensation.acquisition_options()=='pwm')):
                         from rx706_qam_pwm import validate_pwm_header
                         pwm = dict(symbols=self.qam_pwm_symbols.get(),
                             total_chips=int(self.pwm2_total_chips.get()),
                             prefix_chips=int(self.pwm2_prefix_chips.get()),
                             guard_chips=int(self.pwm2_guard_chips.get()),
-                            symbol_hz=float(self.tdcm_pwm_khz.get() if self.constellation_mode.get() == TDCM_MODE else self.pwm_symbol_khz.get())*1000,
+                            symbol_hz=float(self.tdcm_pwm_khz.get() if self.constellation_mode.get() in TDCM_MODES else self.pwm_symbol_khz.get())*1000,
                             gap_s=float(self.qam_pwm_gap_us.get())/1e6,
                             search_s=float(self.qam_pwm_search_ms.get())/1000,
                             max_error_percent=float(self.qam_pwm_error.get()),
@@ -1299,14 +1431,30 @@ class SpectrumWindow:
                             qam_search_symbols=float(self.qam_pwm_qam_window.get()))
                         validate_pwm_header(pwm, options['sample_rate_hz'])
                         recovery_options['pwm_preamble_options'] = pwm
-                    if self.constellation_mode.get() == TDCM_MODE:
+                    if self.constellation_mode.get() in TDCM_MODES:
                         from rx706_tdcm import validate_tdcm
-                        tdcm = dict(base_hz=float(self.tdcm_base_khz.get())*1000,
+                        if self.constellation_mode.get() in (QAM256_120K_MODE,QAM256_120K_LEGACY_MODE):
+                            if int(self.qam_order.get())!=256:raise ValueError('120k／64片预设须为256QAM；其他阶数使用通用训练模式')
+                        if self.constellation_mode.get()==QAM256_120K_MODE:
+                            if int(self.qam_extra_tail_symbols.get())!=0 or self.qam_crc_enabled.get():
+                                raise ValueError('当前3+4+16明文帧无CRC和额外尾部，请关闭CRC调试并将尾符号数设为0')
+                        if self.constellation_mode.get()==PAIRED_64_MODE:
+                            if int(self.qam_order.get())!=64:raise ValueError('当前成对帧预设须为64QAM')
+                            if self.four_corner_payload.get().strip()!='128':raise ValueError('当前成对帧固定128物理净荷；其他长度使用通用训练模式')
+                            self.qam_compensation.values['frame_symbols'].set(str(136+int(self.qam_extra_tail_symbols.get())))
+                        data_symbols=int(self.four_corner_payload.get()) if self.four_corner_payload.get().strip() else 0
+                        tdcm = dict(payload_repeat=int(self.qam_payload_repeat.get()),payload_data_symbols=data_symbols,
+                            payload_tail_symbols=int(self.qam_extra_tail_symbols.get()),crc_debug=dict(enabled=self.qam_crc_enabled.get()),acquisition_mode=self.qam_compensation.acquisition_options(),base_hz=float(self.tdcm_base_khz.get())*1000,
                             harmonic=int(self.tdcm_harmonic.get()),
                             normalization='pwm' if self.tdcm_normalization.get() == 'PWM两态参考' else 'blind',
                             amplitude_scale=float(self.tdcm_amplitude.get()),phase_deg=float(self.tdcm_phase.get()),
                             payload_symbols=int(self.tdcm_count.get()))
                         validate_tdcm(options['sample_rate_hz'],recovery_options['symbol_hz'],tdcm)
+                        if self.qam_compensation.enabled.get():
+                            tdcm['compensation'] = self.qam_compensation.options()
+                            if self.qam_compensation.search_enabled.get():
+                                tdcm['auto_search'] = self.qam_compensation.search_options()
+                                tdcm['payload_symbols'] = 0  # Auto frame candidates supersede the manual count.
                         recovery_options['tdcm_options'] = tdcm
                 elif self.constellation_mode.get() in PWM_MODES:
                     recovery_options.update(kind='pwm', symbol_hz=float(self.pwm_symbol_khz.get())*1000,
@@ -1332,8 +1480,14 @@ class SpectrumWindow:
         except ValueError as exc:
             self.status.set(f"参数错误：{exc}")
             return
+        dialog = getattr(self, '_pwm_dialog', None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.title('PWM 上次分析结果 · 正在重新分析')
+            self._open_pwm_after_analysis = True
         self.result = None
         self.recovery = None
+        self._last_pwm_recipe = None
+        self._last_iq_request = (name, dict(options), dict(recovery_options or {}))
         self._empty_axes()
         self.axes.set_title("Analyzing local IQ file...")
         self.toolbar.update()
@@ -1349,15 +1503,28 @@ class SpectrumWindow:
 
     def _analyze_worker(self, name, options, recovery_options=None):
         try:
+            bound = (recovery_options or {}).get('_iq_bound_recipe')
+            if bound is not None:
+                from rx706_iq_replay import verify_input
+                verify_input(bound)
+            from pathlib import Path
+            source_before=Path(name).stat()
             result = analyze_bin(name, cancel_event=self.cancel, **options)
+            if bound is not None and result.sample_rate_hz != bound['spectrum']['sample_rate_hz']:
+                raise ValueError('同名采集元数据的采样率与绑定方案不一致')
             recovery, recovery_error = None, None
             if recovery_options is not None:
                 from rx706_recovery import recover_periodic
                 try:
                     recovery_options = dict(recovery_options)
+                    recovery_options.pop('_iq_bound_recipe',None)
                     kind = recovery_options.pop('kind','periodic')
                     if kind == 'qam':
                         from rx706_qam import recover_qam
+                        tdcm_options = dict(recovery_options.get('tdcm_options') or {})
+                        if tdcm_options.get('auto_search',{}).get('enabled') or tdcm_options.get('acquisition_mode','pwm')!='pwm':
+                            tdcm_options['_progress_callback'] = lambda message: self.events.put(('progress',message))
+                            recovery_options['tdcm_options'] = tdcm_options
                         recovery = recover_qam(result, cancel_event=self.cancel, **recovery_options)
                     elif kind in ('pwm', 'pwm2'):
                         from rx706_pwm import recover_pwm, recover_pwm2
@@ -1373,6 +1540,16 @@ class SpectrumWindow:
                         recovery = recover_periodic(result, cancel_event=self.cancel, **recovery_options)
                 except ValueError as exc:
                     recovery_error = str(exc)
+                    if getattr(exc,'diagnostics',None):
+                        result.auto_search_failure = exc.diagnostics
+            if bound is not None and recovery is not None and getattr(recovery,'diagnostics',None):
+                recovery.diagnostics.setdefault('warnings',[]).append(bound.get('caveat','训练及映射须与发端确认；未测BER。'))
+            source_after=Path(name).stat()
+            if (source_before.st_size,source_before.st_mtime_ns)!=(source_after.st_size,source_after.st_mtime_ns):
+                raise ValueError('IQ文件在分析期间发生变化，结果已丢弃')
+            result._source_stat=(source_after.st_size,source_after.st_mtime_ns)
+            if bound is not None:
+                verify_input(bound)
             # Prepare a bounded plot trace in the worker as well.
             self.events.put(("result", (result, display_trace(result), recovery, recovery_error)))
         except AnalysisCancelled as exc:
@@ -1388,6 +1565,23 @@ class SpectrumWindow:
         except queue.Empty:
             pass
         else:
+            if kind == 'progress':
+                self.status.set(value)
+                self.poll_after = self.window.after(50,self.poll)
+                return
+            if kind in ('pwm_recipe_saved', 'pwm_recipe_save_error', 'pwm_recipe_save_cancelled'):
+                self.busy = False
+                self._buttons()
+                self.status.set(('已保存PWM IQ绑定方案：' if kind == 'pwm_recipe_saved' else 'PWM方案保存未完成：') + value)
+                self.poll_after = self.window.after(50, self.poll)
+                return
+            if kind == 'pwm_recipe_result':
+                recipe, value = value
+                self.apply_pwm_recipe_parameters(recipe)
+                self._last_pwm_recipe = recipe
+                self._last_iq_request = (recipe['input_path'], dict(recipe['spectrum']),
+                                         dict(kind='pwm', **recipe['recovery']))
+                kind = 'result'
             self.busy = False
             self._buttons()
             self._empty_axes()
@@ -1462,8 +1656,8 @@ class SpectrumWindow:
                            if r.kind in ('pwm','pwm2') else
                            "周期模式恢复相对A/B状态，未确认绝对0/1。") + "功率非dBm。")
                     if r.kind == 'qam':
-                        preview = ' '.join(''.join(map(str, b)) for b in r.bits[:24])
-                        self.summary.set(f'{r.order}QAM；符号率 {r.symbol_hz/1000:g} kSym/s；载波频偏 {r.carrier_hz/1e6:g} MHz。\n静态相位和定时估计；未跟踪时钟漂移或残余频偏；90°旋转歧义未消除。\n判决EVM不能替代参考EVM或证明锁定。Gray映射：I后Q，各轴从负到正，MSB优先，须与发端一致。\n候选比特（未帧同步、未测BER）：{preview}')
+                        preview = ' '.join(f'{int(v):02X}' for v in r.labels[:24])
+                        self.summary.set(f'{r.order}QAM；符号率 {r.symbol_hz/1000:g} kSym/s；载波频偏 {r.carrier_hz/1e6:g} MHz。\n静态相位和定时估计；未跟踪时钟漂移或残余频偏；盲接收存在90°旋转歧义。\n判决EVM不能替代参考EVM或证明锁定。Gray映射：I后Q，各轴从负到正，MSB优先，须与发端一致。\n候选HEX（未测净荷BER）：{preview}')
                         sync = getattr(r, 'preamble', None)
                         if sync is not None:
                             self.status.set(self.status.get()+f"\n前导候选 {sync['length']}符号；位置 {sync['time_s']*1e6:.3f} µs；残余频偏 {sync['frequency_hz']:+.3f} Hz；前导EVM {sync['evm_percent']:.2f}%")
@@ -1492,7 +1686,7 @@ class SpectrumWindow:
                             self.summary.set(pwm_note+'\n'+self.summary.get()+
                                 '\nPWM及切换间隔不输出为QAM数据；未自动分割后续帧。')
                         tdcm = getattr(r,'tdcm',None)
-                        if tdcm is not None:
+                        if tdcm is not None and pwm_sync is not None:
                             self.status.set(self.status.get()+f"\nTDCM {tdcm['harmonic']:+d}阶；每符号 {1e6/r.symbol_hz:g} µs；目标频点 {tdcm['target_hz']/1000:+.6f} kHz")
                             self.summary.set(f"TDCM {tdcm['harmonic']:+d}阶 → {r.order}QAM；基频 {tdcm['base_hz']/1000:g} kHz；"
                                 f"符号率 {r.symbol_hz/1000:g} kSym/s。\n原载波设置 {r.carrier_hz/1000:+.6f} kHz；"
@@ -1503,7 +1697,7 @@ class SpectrumWindow:
                                 f"校准：{tdcm['calibration_note']}；幅度系数 {tdcm['amplitude_scale']:g}；相位修正 {tdcm['phase_deg']:g}°。\n"
                                 "PWM两态校准须符合发端的幅度/时移约定，不能据此保证映射正确；后续重复前导不自动剔除。"
                                 "未持续跟踪载波/时钟漂移；判决EVM不能证明锁定，未测BER。\n"
-                                f"Gray映射：I后Q，各轴从负到正，MSB优先。候选比特：{preview}")
+                                f"Gray映射：I后Q，各轴从负到正，MSB优先。候选HEX：{preview}")
                     if r.kind in ('pwm', 'pwm2'):
                         nominal = r.symbol_rate_hz*r.bits_per_symbol
                         preview = ' | '.join(r.frames['bits' if r.decode_locked else 'candidate_bits'][:32])
@@ -1601,7 +1795,25 @@ class SpectrumWindow:
             else:
                 self.axes.set_title("Analysis stopped" if kind == "cancelled" else "Analysis failed")
                 self.status.set(("" if kind == "cancelled" else "分析失败：") + value)
+            if kind == 'result' and self.recovery is not None and getattr(self.recovery,'diagnostics',None):
+                from rx706_qam_debug_gui import summary_text
+                self.summary.set(summary_text(self.recovery,self.result))
+                self.status.set(self.status.get()+'\n'+self.recovery.diagnostics['quality'])
+            if kind == 'result' and self.recovery is not None and getattr(self.recovery, 'replay_warning', None):
+                self.summary.set(self.summary.get().replace('；擦除', '；参考覆盖范围擦除') + '\n' + self.recovery.replay_warning)
+                from rx706_pwm_replay import payload_diagnostics
+                counts = payload_diagnostics(self.recovery)
+                self.status.set(self.status.get() + f"\n净荷擦除{counts['erased_payload_symbols']}/{counts['payload_symbols']}符号；"
+                                + ('BER未测' if not self._last_pwm_recipe['recovery']['pulse_options']['frame_options']['reference_enabled'] else 'BER仅按已确认参考计分'))
+                if not self.recovery.decode_locked or not self.recovery.frames['valid'].any():
+                    self.status.set(self.status.get() + '\nPWM未锁定或无有效净荷；不能据此报告成功解码或BER。')
             self.canvas.draw()
+            if (kind == 'result' and self.recovery is not None and getattr(self.recovery,'diagnostics',None)
+                    and hasattr(self,'qam_compensation') and self.qam_compensation.auto_open.get()):
+                self.show_qam_report()
+            elif (kind == 'result' and getattr(self.result,'auto_search_failure',None)
+                    and hasattr(self,'qam_compensation') and self.qam_compensation.auto_open.get()):
+                self.show_qam_report()
             if getattr(self, '_open_pwm_after_analysis', False):
                 self._open_pwm_after_analysis = False
                 if kind == 'result' and self.recovery is not None and self.recovery.kind in ('pwm', 'pwm2'):
@@ -1620,6 +1832,433 @@ class SpectrumWindow:
                 filename, self.pending_download = self.pending_download, None
                 self.offer_download(filename)
         self.poll_after = self.window.after(50, self.poll)
+
+    def apply_qam_debug_profile(self, panel):
+        """Explicit user preset; estimates the clock rather than hard-coding this file."""
+        order=int(self.qam_order.get())
+        self.qam_payload_repeat.set('1');self.qam_training_repeats.set('1')
+        panel.repeated_profile(frame_symbols=panel.values['frame_symbols'].get() if order!=256 else None)
+        self.constellation_mode.set(TDCM_MODE)
+        if order!=256:
+            panel.search_values['frame_candidates'].set(panel.values['frame_symbols'].get())
+            self.qam_preamble_enabled.set(False);self.tdcm_normalization.set('盲归一化')
+            self.status.set(f'已为{order}QAM启用重复图样补偿；保留当前速率、载波和窗口数，不推断发端帧长。')
+            return
+        self.tdcm_symbol_khz.set('19.53125')
+        self.tdcm_base_khz.set('19.53125')
+        self.tdcm_pwm_khz.set('19.53125')
+        self.tdcm_carrier_mhz.set('-0.2')
+        self.tdcm_harmonic.set('1')
+        self.tdcm_normalization.set('盲归一化')
+        self.tdcm_amplitude.set('1'); self.tdcm_phase.set('0'); self.tdcm_count.set('0')
+        self.qam_pwm_symbols.set('0 0 0'); self.qam_pwm_gap_us.set('0')
+        self.qam_pwm_search_ms.set('1000'); self.qam_pwm_error.set('25')
+        self.qam_pwm_width_offset.set('0'); self.qam_pwm_frequency_khz.set('1')
+        self.qam_pwm_qam_window.set('8')
+        self.pwm2_total_chips.set('25'); self.pwm2_prefix_chips.set('5'); self.pwm2_guard_chips.set('8')
+        self.qam_preamble_enabled.set(False)
+        self.status.set('已载入重复图样假设：3个PWM + 256个QAM窗口；Fs须核对。点击分析信号。')
+
+    def activate_qam_auto_search(self):
+        if self.constellation_mode.get() not in (FOUR_CORNER_MODE,PAIRED_64_MODE) or self.qam_compensation.acquisition_options()!='pwm':
+            self.constellation_mode.set(TDCM_MODE)
+        self.status.set('TDCM获取方式已设置；先核对Fs、标称速率、获取方式与搜索范围，再点击分析信号。')
+
+    def apply_four_corner_training_profile(self):
+        from rx706_qam_preamble import parse_preamble
+        from rx706_qam_profiles import four_corner_training_hex,four_corner_payload
+        p=self.qam_compensation;order=int(self.qam_order.get())
+        try:total=int(p.values['frame_symbols'].get())
+        except (ValueError,TypeError):self.status.set('每帧QAM窗口数须为整数');return False
+        old=0
+        if self.qam_preamble_enabled.get():
+            try:old=len(parse_preamble(self.qam_preamble_symbols.get(),'iq' if self.qam_preamble_format.get()=='I/Q电平' else 'hex' if self.qam_preamble_format.get()=='HEX字节（00–FF）' else 'labels',int(self.qam_order.get())))
+            except ValueError:old=0
+        try:
+            payload=four_corner_payload(order,total,old,getattr(self,'four_corner_payload',None).get() if hasattr(self,'four_corner_payload') else '')
+        except ValueError as exc:self.status.set(str(exc));return False
+        repetitions=int(self.qam_training_repeats.get());corners=four_corner_training_hex(order,repetitions)
+        tail=int(self.qam_extra_tail_symbols.get());windows=payload+4*repetitions+tail
+        self.constellation_mode.set(FOUR_CORNER_MODE);self._four_corner_profile_order=order;self._last_qam_order=order
+        p.acquisition_mode.set('有PWM前导（原流程）');p.enabled.set(True);p.search_enabled.set(False)
+        p.clock_mode.set('自动：整帧重复图样');p.phase_mode.set('两态平方载波');p.frame_mode.set('按配置分割全部帧');p.fit_timing.set(False)
+        p.values['frame_symbols'].set(str(windows));p.values['max_frames'].set('2048');p.values['clock_search_ppm'].set('1000')
+        self.qam_preamble_enabled.set(True);self.qam_preamble_format.set('HEX字节（00–FF）')
+        self.qam_preamble_symbols.set(corners);self.qam_preamble_evm.set('10')
+        p.search_values['frame_candidates'].set(str(windows))
+        self.qam_training_orientation.set('自动辨识I/Q镜像');self.qam_training_offset.set(True)
+        self.qam_pwm_symbols.set('0 0 0');self.pwm2_total_chips.set('25');self.pwm2_prefix_chips.set('5');self.pwm2_guard_chips.set('8')
+        self.qam_pwm_gap_us.set('0');self.qam_pwm_qam_window.set('0');self.tdcm_normalization.set('盲归一化')
+        self._next_qam_recipe=None
+        self.status.set(f'已配置{order}QAM：3×20% PWM + {corners}训练 + {payload}个净荷窗口；这是接收假设，实际发端训练/帧长须核对。')
+        return True
+
+    def apply_qam256_120k_frame_profile(self):
+        """Current 3+4+16 plaintext frame; do not assume repeated payload."""
+        self.qam_order.set('256');self.four_corner_payload.set('16')
+        self.qam_training_repeats.set('1');self.qam_payload_repeat.set('1')
+        self.qam_extra_tail_symbols.set('0');self.qam_crc_enabled.set(False)
+        if self.apply_four_corner_training_profile() is False:return False
+        self.constellation_mode.set(QAM256_120K_MODE)
+        self.qam_compensation.clock_mode.set('关闭（配置周期）')
+        self.qam_compensation.phase_mode.set('关闭')
+        self.qam_compensation.values['period_ppm'].set('0')
+        self.tdcm_symbol_khz.set('120');self.tdcm_base_khz.set('120');self.tdcm_pwm_khz.set('120')
+        self.tdcm_harmonic.set('1');self.tdcm_count.set('0')
+        self.pwm2_total_chips.set('64');self.pwm2_prefix_chips.set('16');self.pwm2_guard_chips.set('48')
+        self.qam_pwm_width_offset.set('0');self.qam_pwm_qam_window.set('0')
+        self.update_pwm2_layout()
+        self.status.set('256QAM：120 kSym/s，K=1；3×64片25%PWM + 单遍00 08 88 80 + 16物理明文符号。每帧23周期，无CRC，不假定净荷重复；Fs和原载波须核对。')
+        return True
+
+    def apply_qam256_120k_legacy_frame_profile(self):
+        """Confirmed 3+8+128 frame; preserve actual Fs and original carrier."""
+        self.qam_order.set('256');self.four_corner_payload.set('128')
+        self.qam_training_repeats.set('2');self.qam_payload_repeat.set('1')
+        self.qam_extra_tail_symbols.set('0');self.qam_crc_enabled.set(False)
+        if self.apply_four_corner_training_profile() is False:return False
+        self.constellation_mode.set(QAM256_120K_LEGACY_MODE)
+        self.tdcm_symbol_khz.set('120');self.tdcm_base_khz.set('120');self.tdcm_pwm_khz.set('120')
+        self.tdcm_harmonic.set('1');self.tdcm_count.set('0')
+        self.pwm2_total_chips.set('64');self.pwm2_prefix_chips.set('16');self.pwm2_guard_chips.set('48')
+        self.qam_pwm_width_offset.set('0');self.qam_pwm_qam_window.set('0')
+        self.update_pwm2_layout()
+        self.status.set('256QAM：120 kSym/s，K=1；3×64片25%PWM + 两遍00 08 88 80 + 128物理净荷。每帧139周期；Fs和原载波仍须按采集核对。')
+        return True
+
+    def apply_paired_64_frame_profile(self):
+        self.qam_order.set('64');self.four_corner_payload.set('128')
+        self.qam_training_repeats.set('2');self.qam_payload_repeat.set('2')
+        if self.apply_four_corner_training_profile() is False:return False
+        self.constellation_mode.set(PAIRED_64_MODE)
+        self.status.set('64QAM当前帧：3PWM + 两遍00 04 24 20 + 128物理净荷（64重复对）；额外尾符号按手动配置。CRC参数未知，不校验。')
+        return True
+
+    def load_pwm_recipe(self):
+        """Read only small JSON on Tk's thread; hashing/recovery stays in a worker."""
+        if self.closed or self.busy:
+            return
+        filename = filedialog.askopenfilename(parent=self.window, title='载入PWM IQ绑定JSON并分析',
+                                              filetypes=[('JSON', '*.json')])
+        if not filename:
+            return
+        try:
+            from rx706_pwm_replay import read_recipe
+            recipe = read_recipe(filename)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            messagebox.showerror('无法载入PWM方案', str(exc), parent=self.window)
+            return
+        # Keep a visible previous result until replacement succeeds. Destroying
+        # it here made the PWM window disappear on a replay click (even on failure).
+        dialog = getattr(self, '_pwm_dialog', None)
+        reopen_pwm = dialog is not None and bool(dialog.winfo_exists())
+        if reopen_pwm:
+            dialog.title('PWM 上次分析结果 · 正在重新分析')
+        self.result = self.recovery = self._last_iq_request = self._last_pwm_recipe = None
+        self._next_qam_recipe = self._next_iq_bound_recipe = None
+        self._open_pwm_after_analysis = reopen_pwm
+        self._empty_axes()
+        self.toolbar.update()
+        self.canvas.draw()
+        self.busy = True
+        self.cancel.clear()
+        self.status.set('正在后台校验PWM绑定IQ，校验通过后恢复参数并分析…')
+        self.summary.set('')
+        self._buttons()
+        self.thread = threading.Thread(target=self._pwm_recipe_worker, args=(recipe,),
+                                       daemon=True, name='rx706-pwm-replay')
+        self.thread.start()
+
+    def _pwm_recipe_worker(self, recipe):
+        try:
+            from rx706_pwm_replay import run_recipe
+            result, recovery = run_recipe(recipe, cancel_event=self.cancel,
+                progress=lambda text: self.events.put(('progress', text)))
+            self.events.put(('pwm_recipe_result', (recipe, (result, display_trace(result), recovery, None))))
+        except AnalysisCancelled as exc:
+            self.events.put(('cancelled', str(exc)))
+        except Exception as exc:
+            self.events.put(('error', str(exc)))
+
+    def apply_pwm_recipe_parameters(self, recipe):
+        """Display the exact validated worker snapshot, independent of old QAM state."""
+        import copy
+        sp, rec = recipe['spectrum'], recipe['recovery']
+        pulse, frames = rec['pulse_options'], rec['pulse_options']['frame_options']
+        self.constellation_mode.set(PWM2_MODE)
+        self.pwm2_input_mode.set('脉冲宽度与时延')
+        self.pwm_frame_enabled.set(True)
+        self.filename.set(recipe['input_path'])
+        self.rate.set(str(sp['sample_rate_hz'] / 1e6))
+        self.channel.set('RX' + str(sp['channel']))
+        self.first_tuple.set(str(sp['first_tuple']))
+        self.nfft.set(str(sp['nfft']))
+        self.averages.set(str(sp['averages']))
+        self.remove_dc.set(sp['remove_dc'])
+        self.recovery_ms.set(str(rec['duration_s'] * 1000))
+        self.center_hint.set('自动' if rec['center_hint_hz'] is None else str(rec['center_hint_hz'] / 1e6))
+        self.pwm_symbol_khz.set(str(rec['symbol_hz'] / 1000))
+        for key, variable in (('decimation', self.pwm_decimation), ('width_tolerance', self.pwm_tolerance),
+                              ('hysteresis', self.pwm_hysteresis), ('glitch_tolerance_chips', self.pwm_glitch_chips)):
+            variable.set(str(rec[key]))
+        self.pwm_polarity.set({'A': 'A=1', 'B': 'B=1', 'auto': '自动（PWM约束）'}[rec['state_one']])
+        self.pwm_auto_search.set(False)
+        self.pwm_reference_enabled.set(False)
+        for key, variable in (('step_percent', self.pwm_duty_step), ('symbol_count', self.pwm_duty_count),
+                              ('min_high_chips', self.pwm_min_high_chips), ('low_guard_chips', self.pwm_low_guard_chips)):
+            variable.set(str(pulse[key]))
+        self.pwm_joint_delay.set(pulse['joint_delay'])
+        self.pwm_pulse_tolerance.set(str(pulse['tolerance_chips']))
+        self.pwm_nearest_decision.set(pulse['nearest_decision'])
+        self.pwm_pulse_codebook.set('\n'.join(f'{d:g} {w:g}' for d, w in pulse['codebook']))
+        self.pwm_frame_users = copy.deepcopy(frames['users'])
+        for key, variable in (('user_count', self.pwm_frame_user_count), ('search_symbols', self.pwm_frame_search),
+                              ('identity_errors', self.pwm_frame_identity_errors), ('training_tolerance', self.pwm_frame_training_tolerance)):
+            variable.set(str(frames[key]))
+        self.pwm_frame_reference_enabled.set(frames['reference_enabled'])
+        self.pwm_frame_reference_format.set('二进制比特' if frames['reference_format'] == 'bits' else '符号值')
+        self.pwm_frame_reference_repeat.set(frames['reference_repeat'])
+        self.pwm_frame_reference_reset.set(frames['reference_reset'])
+        self.pwm2_clock_width.set(frames['clock_width'])
+        self.refresh_parameter_visibility()
+        self.update_duty_summary()
+
+    def save_pwm_recipe(self):
+        """Export the last completed PWM analysis, never current edited controls."""
+        if self.closed or self.busy:
+            return
+        import copy
+        from pathlib import Path
+        request = getattr(self, '_last_iq_request', None)
+        if not request or self.result is None or self.recovery is None or not getattr(self.recovery, 'pulse_options', None):
+            messagebox.showerror('无法保存', '请先完成一次PWM脉冲宽度与时延分析。', parent=self.window)
+            return
+        filename = filedialog.asksaveasfilename(parent=self.window, title='保存本次PWM IQ绑定JSON',
+            initialfile=Path(request[0]).stem + '_pwm_replay.json', defaultextension='.json', filetypes=[('JSON', '*.json')])
+        if not filename:
+            return
+        snapshot = copy.deepcopy(request)
+        snapshot[1]['sample_rate_hz'] = self.result.sample_rate_hz
+        source_stat = getattr(self.result, '_source_stat', None)
+        prior_recipe = copy.deepcopy(getattr(self, '_last_pwm_recipe', None))
+        self.busy = True
+        self.cancel.clear()
+        self.status.set('正在后台校验并保存本次PWM分析快照…')
+        self._buttons()
+        self.thread = threading.Thread(target=self._save_pwm_recipe_worker,
+            args=(snapshot, source_stat, prior_recipe, filename), daemon=True, name='rx706-pwm-recipe-save')
+        self.thread.start()
+
+    def _save_pwm_recipe_worker(self, request, source_stat, prior_recipe, filename):
+        try:
+            from pathlib import Path
+            from rx706_pwm_replay import make_recipe, verify_input
+            from rx706_spectrum import _cancel
+            name, sp, rec = request
+            def unchanged():
+                stat = Path(name).stat()
+                if (stat.st_size, stat.st_mtime_ns) != source_stat:
+                    raise ValueError('IQ文件自分析后已变化，请重新分析后再保存')
+            unchanged()
+            if prior_recipe is not None:
+                recipe = prior_recipe
+            else:
+                rec = {k: v for k, v in rec.items() if k in ('duration_s', 'symbol_hz', 'center_hint_hz',
+                    'decimation', 'state_one', 'width_tolerance', 'hysteresis', 'glitch_tolerance_chips', 'pulse_options')}
+                # A manual BER checkbox is not proof the transmitter reference was verified.
+                rec['pulse_options']['frame_options']['reference_enabled'] = False
+                recipe = make_recipe(name, cancel_event=self.cancel, **sp, **rec)
+            verify_input(recipe, self.cancel)
+            unchanged()
+            _cancel(self.cancel)
+            with Path(filename).open('x', encoding='utf-8') as stream:
+                json.dump(recipe, stream, ensure_ascii=False, indent=2, allow_nan=False)
+                stream.write('\n')
+            self.events.put(('pwm_recipe_saved', filename + ('；未核验参考默认关闭' if prior_recipe is None else '')))
+        except AnalysisCancelled as exc:
+            self.events.put(('pwm_recipe_save_cancelled', str(exc)))
+        except Exception as exc:
+            self.events.put(('pwm_recipe_save_error', str(exc)))
+
+    def load_qam_recipe(self):
+        if self.closed or self.busy:
+            return
+        import json
+        from pathlib import Path
+        filename=filedialog.askopenfilename(parent=self.window,title='载入通用参数或同一IQ片段的冻结方案',filetypes=[('JSON','*.json')])
+        if not filename:return
+        try:
+            path=Path(filename)
+            if path.stat().st_size>512*1024:raise ValueError('方案JSON超过512KiB')
+            recipe=json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(recipe,dict):raise ValueError('方案须为JSON对象')
+            if recipe.get('method')=='iq_bound_tdcm_replay':
+                from rx706_iq_replay import validate_recipe
+                recipe=validate_recipe(recipe)
+                if not Path(recipe['input_path']).is_file():raise ValueError('绑定的IQ文件不存在：'+recipe['input_path'])
+                sp=recipe['spectrum']; rec=recipe['recovery']
+                self.filename.set(recipe['input_path']);self.rate.set(str(sp['sample_rate_hz']/1e6))
+                self.channel.set('RX1' if sp['channel']==1 else 'RX2');self.first_tuple.set(str(sp['first_tuple']))
+                self.nfft.set(str(sp['nfft']));self.averages.set(str(sp['averages']));self.remove_dc.set(sp['remove_dc'])
+                self.apply_qam_recipe_parameters(dict(method='iq_bound_tdcm_replay',**rec))
+                self.constellation_mode.set(TDCM_MODE);self.qam_compensation.auto_open.set(True)
+                self._next_qam_recipe=None;self._next_iq_bound_recipe=recipe
+                self.analyze();return
+            if recipe.get('method')=='tdcm_parameter_config':
+                self.apply_qam_parameter_config(recipe)
+                return  # Parameters only: never analyze or replay an IQ file on load.
+            if recipe.get('version')!=1 or recipe.get('method') not in ('bounded_repeated_tdcm','headerless_tdcm_config','frozen_central_tdcm_capture'):raise ValueError('方案格式不支持')
+            fp=recipe['input_fingerprint']
+            self.rate.set(str(float(fp['sample_rate_hz'])/1e6))
+            self.channel.set('RX1' if fp['channel']==1 else 'RX2');self.first_tuple.set(str(fp['first_tuple']))
+            self.constellation_mode.set(TDCM_MODE)
+            self.apply_qam_recipe_parameters(recipe)
+            if recipe.get('method')=='frozen_central_tdcm_capture':
+                if recipe.get('input_path'):self.filename.set(str(Path(recipe['input_path']).expanduser()))
+                self.qam_compensation.auto_open.set(True)
+            self._next_qam_recipe=recipe
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            messagebox.showerror('无法载入方案',str(exc),parent=self.window);return
+        self.analyze()
+
+    def save_iq_bound_recipe(self):
+        """Save the exact successful TDCM run, not edited controls after it."""
+        if self.closed or self.busy:return
+        request=getattr(self,'_last_iq_request',None)
+        if not request or self.result is None or self.recovery is None or self.recovery.kind!='qam':
+            messagebox.showerror('无法保存','请先成功完成一次有PWM前导的TDCM补偿分析。',parent=self.window);return
+        name,sp,rec=request
+        if rec.get('_iq_bound_recipe'):
+            rec=dict(kind='qam',**rec['_iq_bound_recipe']['recovery'])
+        try:
+            from rx706_iq_replay import make_recipe
+            from pathlib import Path
+            cfg=dict(version=1,method='tdcm_parameter_config',order=rec['order'],symbol_hz=rec['symbol_hz'],
+                     tdcm_options=rec['tdcm_options'],pwm_preamble_options=rec['pwm_preamble_options'],preamble_options=rec['preamble_options'])
+            # Use the actual sample rate (metadata can override the requested fallback).
+            source=Path(name).stat()
+            if (source.st_size,source.st_mtime_ns)!=getattr(self.result,'_source_stat',None):
+                raise ValueError('IQ文件自分析后已变化，请重新分析后再保存')
+            recipe=make_recipe(name,cfg,sample_rate_hz=self.result.sample_rate_hz,channel=sp['channel'],
+                first_tuple=sp['first_tuple'],duration_s=rec['duration_s'],center_hint_hz=rec['center_hint_hz'],
+                nfft=sp['nfft'],averages=sp['averages'],remove_dc=sp['remove_dc'])
+            after=Path(name).stat()
+            if (after.st_size,after.st_mtime_ns)!=self.result._source_stat:
+                raise ValueError('IQ文件自分析后已变化，请重新分析后再保存')
+            filename=filedialog.asksaveasfilename(parent=self.window,title='保存IQ绑定复算方案',defaultextension='.json',
+                initialfile=Path(name).stem+'_replay.json',filetypes=[('JSON','*.json')])
+            if not filename:return
+            import json
+            with open(filename,'x',encoding='utf-8') as stream:
+                json.dump(recipe,stream,ensure_ascii=False,indent=2);stream.write('\n')
+            self.status.set('已保存IQ绑定复算方案：'+filename)
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            messagebox.showerror('无法保存',str(exc),parent=self.window)
+
+    def apply_qam_parameter_config(self, config):
+        """Validate before updating; preserve file/Fs/carrier/channel/start."""
+        from rx706_qam_config import validate_parameter_config
+        parameters=validate_parameter_config(config)
+        self.apply_qam_recipe_parameters(parameters)
+        self.constellation_mode.set(TDCM_MODE)
+        self._next_qam_recipe=None
+        self.recovery=None
+        self.update_pwm2_layout()
+        self.status.set('通用参数已载入；当前IQ文件、Fs、原载波、通道及起点保持不变。请核对后点击分析信号；没有自动分析。')
+        return True
+
+    def apply_qam_recipe_parameters(self, recipe):
+        """Show the recipe's actual settings before its one-shot replay."""
+        from rx706_qam_debug_gui import ACQUISITION_MODES,CLOCK_MODES,PHASE_MODES,FRAME_MODES
+        if self.constellation_mode.get() not in QAM_MODES:
+            self.constellation_mode.set(TDCM_MODE)
+        args=recipe.get('reproducible_options',{}) if recipe['method']=='headerless_tdcm_config' else recipe
+        td=args.get('tdcm_options',{});comp=td.get('compensation',{});p=self.qam_compensation
+        def number(variable,value): variable.set(f'{float(value):.12g}')
+        if 'duration_s' in args:number(self.recovery_ms,1000*args['duration_s'])
+        if 'order' in args:
+            self.qam_order.set(str(int(args['order'])));self._last_qam_order=int(args['order'])
+        self._four_corner_profile_order=None
+        if 'symbol_hz' in args:number(self.tdcm_symbol_khz,args['symbol_hz']/1000)
+        if 'center_hint_hz' in args:number(self.tdcm_carrier_mhz,args['center_hint_hz']/1e6)
+        for key,var,scale in [('base_hz',self.tdcm_base_khz,1000),('harmonic',self.tdcm_harmonic,1),
+                ('amplitude_scale',self.tdcm_amplitude,1),('phase_deg',self.tdcm_phase,1),('payload_symbols',self.tdcm_count,1)]:
+            if key in td:number(var,td[key]/scale)
+        if 'normalization' in td:self.tdcm_normalization.set('PWM两态参考' if td['normalization']=='pwm' else '盲归一化')
+        mode=td.get('acquisition_mode','pwm')
+        p.acquisition_mode.set(next(label for label,value in ACQUISITION_MODES.items() if value==mode))
+        p.enabled.set(bool(comp.get('enabled',False)))
+        p.search_enabled.set(bool(td.get('auto_search',{}).get('enabled',False)))
+        for key,var,modes in [('clock_mode',p.clock_mode,CLOCK_MODES),('phase_mode',p.phase_mode,PHASE_MODES),('frame_mode',p.frame_mode,FRAME_MODES)]:
+            if key in comp:var.set(next(label for label,value in modes.items() if value==comp[key]))
+        for key,var in p.values.items():
+            if key in comp:number(var,comp[key])
+        p.fit_timing.set(bool(comp.get('fit_timing',False)))
+        self.qam_payload_repeat.set(str(td.get('payload_repeat',1)))
+        self.qam_extra_tail_symbols.set(str(td.get('payload_tail_symbols',0)))
+        self.qam_crc_enabled.set(bool(td.get('crc_debug',{}).get('enabled',False)))
+        search=td.get('auto_search',{})
+        for key,var in p.search_values.items():
+            if key=='carrier_span_khz' and 'carrier_span_hz' in search:number(var,search['carrier_span_hz']/1000)
+            elif key in search:
+                value=search[key];var.set(' '.join(map(str,value)) if isinstance(value,list) else str(value))
+        training=args.get('preamble_options');self.qam_preamble_enabled.set(training is not None)
+        if training:
+            self.qam_preamble_symbols.set(str(training.get('symbols','')))
+            self.qam_preamble_format.set('I/Q电平' if training.get('representation')=='iq' else 'HEX字节（00–FF）' if training.get('representation')=='hex' else '符号值（Gray）')
+            self.qam_training_orientation.set({'normal':'不共轭（原流程）','auto':'自动辨识I/Q镜像','conjugate':'固定共轭'}[training.get('orientation','normal')])
+            self.qam_training_offset.set(bool(training.get('fit_dc_offset',False)))
+            from rx706_qam_preamble import parse_preamble
+            from rx706_qam import decide
+            expected=parse_preamble(training.get('symbols',''),training.get('representation','labels'),int(args.get('order',256)))
+            from rx706_qam_profiles import corner_repetitions
+            order=int(args.get('order',256))
+            repetitions=corner_repetitions(decide(expected,order)[1].tolist(),order)
+            if repetitions:
+                self.qam_training_repeats.set(str(repetitions))
+                self.constellation_mode.set(PAIRED_64_MODE if order==64 and repetitions==2 and td.get('payload_repeat')==2 and td.get('payload_data_symbols')==128 else FOUR_CORNER_MODE);self._four_corner_profile_order=order
+                if hasattr(self,'four_corner_payload'):self.four_corner_payload.set(str(td.get('payload_data_symbols') or int(comp.get('frame_symbols',256))-len(expected)-int(td.get('payload_tail_symbols',0))))
+            self._last_qam_order=order
+            for key,var,scale in [('max_frequency_hz',self.qam_preamble_frequency_khz,1000),('max_evm_percent',self.qam_preamble_evm,1),('search_s',self.qam_preamble_search_ms,.001)]:
+                if key in training:number(var,training[key]/scale)
+        pwm=args.get('pwm_preamble_options',{})
+        if pwm:
+            values=pwm.get('symbols','0 0 0');self.qam_pwm_symbols.set(' '.join(map(str,values)) if isinstance(values,list) else str(values))
+            for key,var,scale in [('symbol_hz',self.tdcm_pwm_khz,1000),('gap_s',self.qam_pwm_gap_us,.000001),
+                    ('search_s',self.qam_pwm_search_ms,.001),('max_error_percent',self.qam_pwm_error,1),
+                    ('max_frequency_hz',self.qam_pwm_frequency_khz,1000),('width_offset_chips',self.qam_pwm_width_offset,1),
+                    ('qam_search_symbols',self.qam_pwm_qam_window,1),('total_chips',self.pwm2_total_chips,1),
+                    ('prefix_chips',self.pwm2_prefix_chips,1),('guard_chips',self.pwm2_guard_chips,1)]:
+                if key in pwm:number(var,pwm[key]/scale)
+
+    def show_qam_report(self):
+        if self.closed:
+            return
+        if self.busy:
+            messagebox.showinfo('分析进行中','请等待当前分析完成后打开QAM诊断。',parent=self.window)
+            return
+        failure = getattr(self.result,'auto_search_failure',None) if self.result is not None else None
+        if self.recovery is None and failure:
+            previous=getattr(self,'_qam_report',None)
+            if previous is not None and not previous.closed:
+                if getattr(previous,'failure',None) is failure:
+                    previous.window.lift();return previous
+                previous.close()
+            from rx706_qam_debug_gui import AutoSearchFailureWindow
+            self._qam_report=AutoSearchFailureWindow(self.window,failure)
+            return self._qam_report
+        if self.recovery is None or self.recovery.kind != 'qam':
+            messagebox.showinfo('QAM诊断','选择QAM或TDCM模式并完成分析后，可查看候选符号和补偿诊断。',parent=self.window)
+            return
+        previous = getattr(self,'_qam_report',None)
+        if previous is not None and not previous.closed:
+            if previous.r is self.recovery:
+                previous.window.deiconify(); previous.window.lift()
+                return previous
+            previous.close()
+        from rx706_qam_debug_gui import QAMReportWindow
+        self._qam_report = QAMReportWindow(self.window,self.recovery,self.result)
+        return self._qam_report
 
     def show_pwm_symbols(self):
         """Open a bounded table; exports include all rows and preserve erasures."""
@@ -1909,6 +2548,9 @@ class SpectrumWindow:
                                   per_user=r.frame_check.per_user, blocks=r.frame_check.blocks)
                     if r.pulse_options is not None:
                         report.update(pulse_config=r.pulse_options, calibrations=r.pulse_calibrations)
+                    if getattr(r, 'replay_warning', None):
+                        from rx706_pwm_replay import payload_diagnostics
+                        report.update(warning=r.replay_warning, **payload_diagnostics(r))
                     Path(target).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
                 except OSError as exc:
                     messagebox.showerror('导出失败', str(exc), parent=dialog)
@@ -1924,6 +2566,9 @@ class SpectrumWindow:
             return
         self.closed = True
         self.cancel.set()
+        report = getattr(self,'_qam_report',None)
+        if report is not None:
+            report.close()
         if hasattr(self, "navigation"):
             self.navigation.close()
         canvas = getattr(self, 'canvas', None)

@@ -45,12 +45,17 @@ def synthesize(options, rounds=3, fs=15.36e6, rate=169971.671, tail_us=1.72, cro
 
 
 def screenshot_case():
-    """Replay the five measured delay/width pairs from the user's symbol table."""
+    """Replay measured payload pairs behind an unambiguous synthetic marker.
+
+    This tests nearest-codeword handling, not the historical capture framing.
+    The original on-disk profile and its ambiguous marker remain unchanged.
+    """
     path = Path(__file__).resolve().parents[1]/'host/frame_profiles/limit14_step5/single_user_image23.json'
     profile = json.loads(path.read_text(encoding='utf-8'))
+    profile['users'][0]['identity'] = '0 5 2 7'
     c = validate_pulse_options(dict(profile, step_percent=profile['duty_step'],
         symbol_count=profile['duty_count'], frame_options=dict(profile, reference_format='symbols')), 169971.671)
-    sent = np.tile(np.r_[np.zeros(4, int), np.arange(1, 24)], 3)
+    sent = np.tile(np.r_[[0, 5, 2, 7], np.arange(1, 24)], 3)
     fs, rate, total = 15.36e6, 169971.671, 20
     period, origin, tail = 1/rate, .37/rate, .1760764430549e-6
     book = np.asarray(c['codebook'])
@@ -76,7 +81,9 @@ class PulseTests(unittest.TestCase):
     def test_short_preamble_slope_cannot_drift_payload_or_later_header_search(self):
         fs, rate = 15.36e6, 213980.029
         chosen = config(payload=1024)
-        chosen['frame_options']['users'][0]['identity'] = '0 0 0 0'
+        # Mixed widths avoid repeated-marker ambiguity; zero delays preserve
+        # the deliberately linear local edge-slope disturbance.
+        chosen['frame_options']['users'][0]['identity'] = '0 5 2 7'
         for rounds in (1, 3):
             with self.subTest(rounds=rounds):
                 c, sent, rises, falls, t, high, origin = synthesize(chosen, rounds=rounds, rate=rate, tail_us=.2)

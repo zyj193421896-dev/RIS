@@ -12,7 +12,8 @@ from rx706_pwm_frames import validate_frame_options
 PULSE_FIELDS = [('rise_s', 'f8'), ('fall_s', 'f8'), ('delay_chips', 'f8'),
                 ('delay_us', 'f8'), ('raw_pulse_us', 'f8'), ('tail_us', 'f8'),
                 ('calibration_error_us', 'f8'), ('decision_estimated', '?'),
-                ('decision_distance_chips', 'f8')]
+                ('decision_distance_chips', 'f8'), ('sync_status', 'U24'),
+                ('calibration_model', 'U24')]
 
 
 def validate_pulse_options(options, symbol_hz, fs=None):
@@ -129,42 +130,83 @@ def _nearest_codeword(delay, width, pairs, joint, tolerance):
     return k, within, tied, float(distance[k])
 
 
-def _header(rises, falls, pulse_at, user, pairs, period, config):
-    code = np.asarray(user['identity'], dtype=int)
-    length = len(code)
-    if pulse_at < 0 or pulse_at+length > len(rises):
-        return None
-    selected = pairs[code]
-    relative = np.arange(length)+selected[:, 0]/config['total_chips']
-    observed = rises[pulse_at:pulse_at+length]
-    # Nominal period seeds phase. Robust fitting excludes at most the explicitly
-    # configured number of marker errors; the known payload is never consulted.
+def _marker_calibration(rises, falls, at, selected, period, config):
+    """Fit only known marker edges, at the final clock; never read payloads.
+
+    A single distinct width identifies offset only, not an affine response.
+    With diverse widths, robust pairwise slopes identify scale and offset.
+    """
+    n = len(selected)
+    observed = rises[at:at+n]
+    relative = np.arange(n)+selected[:, 0]/config['total_chips']
+    phase_samples = observed-relative*period
+    anchor = float(np.median(phase_samples))
     allowance = (config['tolerance_chips']*period/config['total_chips']+
                  config.get('preamble_sample_margin_us', 0.)*1e-6)
-    trial, anchor = np.polyfit(relative, observed, 1)
-    if abs(trial/period-1) > .02:
+    timing_good = abs(phase_samples-anchor) <= allowance
+    # At most one edge outlier in a short marker, explicitly diagnosed.
+    required = max(3, n-max(1, config['frame_options']['identity_errors']))
+    if timing_good.sum() < required:
         return None
-    good = abs(observed-(anchor+relative*trial)) <= allowance
-    permitted = config['frame_options']['identity_errors']
-    if good.sum() < max(4, length-permitted):
+    anchor = float(np.median(phase_samples[timing_good]))
+    x = selected[:, 1]/config['total_chips']*period
+    y = falls[at:at+n]-observed
+    indices = np.flatnonzero(timing_good)
+    slopes = [(y[j]-y[i])/(x[j]-x[i]) for k,i in enumerate(indices)
+              for j in indices[k+1:] if abs(x[j]-x[i]) > period*1e-8]
+    identifiable = bool(slopes) and len(indices) >= 3
+    scale = float(np.median(slopes)) if identifiable else 1.
+    if not np.isfinite(scale) or scale <= 0:
         return None
-    fitted, anchor = np.polyfit(relative[good], observed[good], 1)
-    if abs(fitted/period-1) > .02:
+    offset = float(np.median((y-scale*x)[timing_good]))
+    if not identifiable and offset < -allowance:
         return None
-    rise_error = observed-(anchor+relative*fitted)
-    widths = falls[pulse_at:pulse_at+length]-observed
-    tails = widths-selected[:, 1]/config['total_chips']*fitted
-    tail = float(np.median(tails[good]))
-    if tail < -allowance:
+    if not identifiable:
+        offset = max(0., offset)
+    residual = y-(scale*x+offset)
+    good = timing_good & (abs(residual) <= allowance)
+    if good.sum() < required:
         return None
-    tail = max(0., tail)
-    residual = tails-tail
-    good &= (abs(rise_error) <= allowance) & (abs(residual) <= allowance)
-    if good.sum() < max(4, length-permitted):
+    error = float(np.sqrt(np.mean(np.r_[observed[good]-anchor-relative[good]*period,
+                                         residual[good]]**2)))
+    return dict(anchor=anchor, period=float(period), tail=max(0., float(np.median((y-x)[good]))),
+                width_offset_s=offset, width_scale=scale,
+                model_identifiable=identifiable,
+                calibration_model='affine' if identifiable else 'offset_only',
+                timing_rejected=int(n-timing_good.sum()),
+                width_rejected=int(np.count_nonzero(abs(residual) > allowance)),
+                error=error, pulse_at=int(at), errors=int(n-good.sum()))
+
+
+def _header(rises, falls, pulse_at, user, pairs, period, config):
+    code = np.asarray(user['identity'], dtype=int)
+    if pulse_at < 0 or pulse_at+len(code) > len(rises):
         return None
-    error = float(np.sqrt(np.mean(np.r_[rise_error[good], residual[good]]**2)))
-    return dict(anchor=float(anchor), period=float(fitted), tail=float(tail),
-                error=error, pulse_at=int(pulse_at), errors=int(length-good.sum()))
+    selected = pairs[code]
+    # Robust local slope is used only for acquisition; final decoding always
+    # re-estimates phase with the long-baseline clock below. Repeated medians
+    # tolerate a single first-edge outlier without using any payload reference.
+    relative = np.arange(len(code))+selected[:, 0]/config['total_chips']
+    observed = rises[pulse_at:pulse_at+len(code)]
+    trial = float(np.median([np.median([(observed[j]-observed[i])/(relative[j]-relative[i])
+                 for j in range(len(code)) if j != i]) for i in range(len(code))]))
+    if abs(trial/period-1) <= .02:
+        result = _marker_calibration(rises, falls, pulse_at, selected, trial, config)
+        if result is not None:
+            return result
+    return _marker_calibration(rises, falls, pulse_at, selected, period, config)
+
+
+def _competing_marker(rises, falls, match, user, pairs, period, config):
+    """Adjacent fits in a repeated marker are an unobservable frame offset.
+
+    Do not choose the lower-residual fit and pretend it proves the frame phase.
+    """
+    for at in (match['pulse_at']-1, match['pulse_at']+1):
+        other = _header(rises, falls, at, user, pairs, period, config)
+        if other is not None and abs(other['anchor']-match['anchor']) < 1.5*period:
+            return True
+    return False
 
 
 def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options, cancel_event=None):
@@ -202,7 +244,9 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
     # slope. Use the configured clock to reach the next known header; only a
     # long baseline between headers may change the payload/schedule period.
     anchor, period = initial['anchor'], nominal
+    reliable_track = False
     prior = None
+    clock_history = []
     while anchor <= times[-1]:
         _cancel(cancel_event)
         user = frame_config['users'][user_at]
@@ -217,29 +261,63 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
                 if value is not None and abs(value['anchor']-anchor) < 2*period:
                     candidates.append(value)
             if candidates:
-                match = min(candidates, key=lambda value: (value['errors'], value['error'], abs(value['anchor']-anchor)))
+                match = min(candidates, key=lambda value: (abs(value['anchor']-anchor), value['errors'], value['error']))
+        ambiguous = False
+        tracked = False
+        if match is None:
+            reliable_track = False
         if match is not None:
+            ambiguous = _competing_marker(rises, falls, match, user, pairs, nominal, config)
+            # A previous unambiguous lock can disambiguate adjacent repeated fits.
+            if ambiguous and reliable_track and abs(match['anchor']-anchor) < .45*period:
+                ambiguous = False
+                tracked = True
+            reliable_track = not ambiguous
             anchor = match['anchor']
-            if prior is not None:
-                refined = (anchor-prior[1])/(symbol_at-prior[0])
+            if not ambiguous:
+                clock_history.append((symbol_at, anchor))
+            clock_history = clock_history[-32:]
+            if len(clock_history) >= 3:
+                slopes = [(b[1]-a[1])/(b[0]-a[0]) for j,a in enumerate(clock_history)
+                          for b in clock_history[j+1:]]
+                refined = float(np.median(slopes))
                 if abs(refined/nominal-1) <= .02:
                     period = refined
             prior = symbol_at, anchor
         schedule.append(dict(symbol_at=symbol_at, anchor=anchor, user_at=user_at,
-                             length=length, match=match))
+                             length=length, match=match, ambiguous=ambiguous, tracked=tracked))
         symbol_at += length
         anchor += period*length
         user_at = (user_at+1) % frame_config['user_count']
     # Long-baseline timing from known markers avoids clock drift accumulating
     # over a 1024-symbol payload when preamble edge estimates have sample jitter.
-    known = [item for item in schedule if item['match'] is not None]
+    known = [item for item in schedule if item['match'] is not None and not item['ambiguous']]
     if len(known) >= 2:
         period, _ = np.polyfit([item['symbol_at'] for item in known],
                                [item['anchor'] for item in known], 1)
         config['clock_source'] = '多个身份前导的长间隔拟合'
     else:
-        period = nominal
-        config['clock_source'] = '配置符号率（仅一个完整身份前导）'
+        local_periods = [item['match']['period'] for item in schedule if item['match'] is not None]
+        if len(local_periods) >= 3 and any(item['ambiguous'] for item in schedule):
+            period = float(np.median(local_periods))
+            config['clock_source'] = '前导局部周期中位数（帧边界仍有歧义）'
+        else:
+            period = nominal
+            config['clock_source'] = '配置符号率（可靠前导不足）'
+    phase_track_valid = False
+    # Re-estimate phase and width model using this exact final period.
+    for item in schedule:
+        if item['match'] is not None:
+            selected = pairs[np.asarray(frame_config['users'][item['user_at']]['identity'], int)]
+            fixed = _marker_calibration(rises, falls, item['match']['pulse_at'], selected, period, config)
+            item['match'] = fixed
+            if fixed is not None:
+                item['anchor'] = fixed['anchor']
+        if item['tracked'] and not phase_track_valid:
+            item['ambiguous'] = True
+            item['tracked'] = False
+        phase_track_valid = item['match'] is not None and not item['ambiguous']
+    config['sync_ambiguous_blocks'] = sum(item['ambiguous'] for item in schedule)
     count = max(0, int(math.floor((times[-1]+1/fs-initial['anchor'])/period+1e-6)))
     if count < len(frame_config['users'][first_user]['identity']):
         raise ValueError('完整身份前导后没有足够符号')
@@ -271,16 +349,23 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
         if match is not None:
             selected = pairs[np.asarray(user['identity'], int)]
             at = match['pulse_at']
-            tail = max(0., float(np.median(falls[at:at+len(selected)]-rises[at:at+len(selected)]-
-                                          selected[:, 1]/total*period)))
-            match['tail'] = tail
+            tail = match['tail']
             last_by_user[user_at] = match
             calibrations.append(dict(block_id=block_at+1, user_id=user_at+1,
                 start_s=float(item['anchor']), tail_us=tail*1e6,
-                residual_us=match['error']*1e6, identity_errors=match['errors']))
+                residual_us=match['error']*1e6, identity_errors=match['errors'],
+                timing_rejected=match['timing_rejected'],
+                width_scale=match['width_scale'], width_offset_chips=match['width_offset_s']/period*total,
+                model_identifiable=match['model_identifiable'], calibration_model=match['calibration_model'],
+                sync_ambiguous=item['ambiguous']))
         calibration = match or last_by_user.get(user_at)
         tail = calibration['tail'] if calibration else np.nan
-        valid_header = match is not None
+        valid_header = match is not None and not item['ambiguous']
+        scale = calibration['width_scale'] if calibration else 1.
+        offset = calibration['width_offset_s'] if calibration else np.nan
+        rows['sync_status'][begin:end] = 'ambiguous' if item['ambiguous'] else 'tracking' if item['tracked'] else 'locked' if match else 'missing'
+        rows['calibration_model'][begin:end] = calibration['calibration_model'] if calibration else 'insufficient'
+        rows['width_scale'][begin:end] = scale
         # Use local marker phase with the globally measured period. Bad headers
         # keep their scheduled slots and are erased, including their payload.
         start = item['anchor']
@@ -293,7 +378,7 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
         rows['payload_index'][header_end:end] = np.arange(end-header_end)
         rows['tail_us'][begin:end] = tail*1e6
         rows['calibration_id'][begin:end] = block_at+1 if valid_header else 0
-        rows['calibration_source'][begin:end] = '身份前导：下降沿拖尾校正' if valid_header else '身份失败：保持时隙'
+        rows['calibration_source'][begin:end] = ('多宽前导仿射校准' if calibration['model_identifiable'] else '单宽前导偏置，增益未知') if valid_header else '前导歧义/失败：保持时隙'
         rows['calibration_error_us'][begin:end] = calibration['error']*1e6 if calibration else np.nan
         for i in range(begin, end):
             if i % 1024 == 0:
@@ -310,7 +395,7 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
             if right-left == 1:
                 rise, fall = rises[left], falls[left]
                 delay, raw_width = (rise-slot)/period*total, (fall-rise)/period*total
-                width = raw_width-tail/period*total
+                width = (raw_width-offset/period*total)/scale
                 row['rise_s'], row['fall_s'] = rise, fall
                 row['delay_chips'], row['delay_us'] = delay, (rise-slot)*1e6
                 row['raw_pulse_us'] = (fall-rise)*1e6
@@ -337,7 +422,7 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
                 elif not good:
                     row['reason'] = '补偿后脉宽/时延偏离码表或码字不唯一'
                 elif not valid_header:
-                    row['reason'] = '身份前导失败：净荷按擦除保位'
+                    row['reason'] = '前导位置歧义：净荷按擦除保位' if item['ambiguous'] else '身份前导失败：净荷按擦除保位'
                 else:
                     row['valid'], row['symbol'], row['bits'] = True, k, format(k, f'0{bits}b')
                     row['decision_estimated'] = not within or tied
@@ -355,5 +440,5 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
         calibration['conservative_codewords'] = int(np.count_nonzero(pairs.sum(axis=1)+guard+config['low_guard_chips'] <= total))
         calibration['high_stability_period_us'] = tail_seconds*total/config['min_high_chips']*1e6
         calibration['no_spill_period_us'] = (tail_seconds+3/fs)/(1-float(pairs.sum(axis=1).max())/total)*1e6
-    config['estimated_min_period_us'] = max(c['high_stability_period_us'] for c in calibrations)
+    config['estimated_min_period_us'] = max((c['high_stability_period_us'] for c in calibrations), default=0.)
     return rows, float(1/period), calibrations, config
