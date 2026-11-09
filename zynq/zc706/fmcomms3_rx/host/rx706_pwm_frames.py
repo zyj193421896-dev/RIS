@@ -313,20 +313,22 @@ def check_frame_reference(frames, options, widths, bitwords, cancel_event=None):
         rows = np.arange(begin, end)
         user_at = int(frames['user_id'][begin])-1
         user, stats = config['users'][user_at], result.per_user[user_at]
-        positions = rows[frames['frame_part'][rows] == '净荷']
+        positions = rows[np.isin(frames['frame_part'][rows], ('净荷', '校准前导'))]
+        pilots = frames['training'][positions]
+        result.row_status[positions[pilots]] = '校准前导/不统计'
         complete = bool(frames['block_complete'][begin])
         identity_ok = bool(frames['identity_ok'][begin])
         estimated = (int(np.count_nonzero(frames['decision_estimated'][positions] & frames['valid'][positions]))
                      if 'decision_estimated' in frames.dtype.names else 0)
         block = dict(block_id=int(frames['block_id'][begin]), user_id=user_at+1,
                      user=user['name'], first_row=int(begin), payload_first_row=int(positions[0]) if len(positions) else int(end),
-                     payload_symbols=len(positions), complete=complete, identity_ok=identity_ok,
+                     payload_symbols=int(np.count_nonzero(~pilots)), complete=complete, identity_ok=identity_ok,
                      evaluated=False, bit_errors=0, compared_bits=0, erased_bits=0, estimated_symbols=estimated, bad=None)
         result.blocks.append(block)
         stats['complete_blocks' if complete else 'partial_blocks'] += 1
         stats['identity_failures'] += int(complete and not identity_ok)
         if not complete:
-            result.row_status[positions] = '尾部不完整块/不统计'
+            result.row_status[positions[~pilots]] = '尾部不完整块/不统计'
             continue
         stats['estimated_symbols'] += estimated
         units = user['payload_symbols']*(word_size if config['reference_format'] == 'bits' else 1)
@@ -335,7 +337,7 @@ def check_frame_reference(frames, options, widths, bitwords, cancel_event=None):
         reference = user['reference']
         if not reference or (not config['reference_repeat'] and start+units > len(reference)):
             stats['unreferenced_blocks'] += 1
-            result.row_status[positions] = '参考未覆盖/不统计'
+            result.row_status[positions[~pilots]] = '参考未覆盖/不统计'
             continue
         if config['reference_repeat']:
             expected = [reference[i % len(reference)] for i in range(start, start+units)]
@@ -351,6 +353,11 @@ def check_frame_reference(frames, options, widths, bitwords, cancel_event=None):
             expected_symbols = [lookup.get(word, -1) for word in expected_bits]
         result.expected[positions] = expected_symbols
         result.row_expected_bits[positions] = expected_bits
+        # Reference alignment still follows ALL physical payload slots. The
+        # explicitly reserved calibration slots are removed only from scoring.
+        result.row_status[positions[pilots]] = '校准前导/不统计'
+        expected_bits = [word for word, pilot in zip(expected_bits, pilots) if not pilot]
+        positions = positions[~pilots]
         valid = frames['valid'][positions] & identity_ok
         errors = np.array([sum(a != b for a, b in zip(str(frames['bits'][row]), word))
                            if good else -1 for row, word, good in zip(positions, expected_bits, valid)], dtype=np.int16)

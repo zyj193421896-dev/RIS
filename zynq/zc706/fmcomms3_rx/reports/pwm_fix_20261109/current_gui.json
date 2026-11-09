@@ -1,0 +1,40 @@
+{
+  "callback_errors": [],
+  "minimum_width_boundary": 4.0,
+  "reference": {
+    "complete_blocks": 2427,
+    "partial_blocks": 1,
+    "identity_failures": 8,
+    "evaluated_blocks": 2427,
+    "bad_blocks": 1395,
+    "bit_errors": 1448,
+    "compared_bits": 1031800,
+    "erased_bits": 21518,
+    "unreferenced_blocks": 0,
+    "estimated_symbols": 6237,
+    "ber": 0.0014033727466563287,
+    "bler": 0.5747836835599506
+  },
+  "rows": [
+    {
+      "index": 56,
+      "delay_chips": 6.03664297443418,
+      "corrected_high_chips": 4.554386963764904,
+      "symbol": 51,
+      "bits": "0110011",
+      "valid": true,
+      "decision_estimated": true,
+      "reason": "有效（最近码字估计；超容差）"
+    },
+    {
+      "index": 61,
+      "delay_chips": 7.080550111396153,
+      "corrected_high_chips": 4.576546549761463,
+      "symbol": 56,
+      "bits": "0111000",
+      "valid": true,
+      "decision_estimated": true,
+      "reason": "有效（最近码字估计；超容差）"
+    }
+  ]
+}

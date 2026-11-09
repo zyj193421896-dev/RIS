@@ -127,7 +127,11 @@ class PWMRecovery:
             return (f"用户身份前导＋净荷；{self.frame_options['user_count']}用户；"
                     f"步长{self.pulse_options['step_percent']:g}%→{self.total_chips}片；"
                     f"最小高电平{self.pulse_options['min_high_chips']}片。"
-                    '每个身份前导独立估计下降沿拖尾和符号边界，无公共训练。')
+                    +('身份前导用于定时，指定的4个循环位置用于宽度校准。' if self.pulse_options.get('cycle_calibration') else
+                      '每个身份前导独立估计宽度校准和符号边界，无公共训练。')
+                    +('补偿脉宽向下取整后匹配合法码字，时延不取整。' if self.pulse_options.get('width_quantization') == 'floor_width'
+                      else '左右区间按最近合法码字判决。')
+                    +self.pulse_options.get('timing_note', '')+self.pulse_options.get('calibration_note', ''))
         if self.frame_options is not None:
             config = self.frame_options
             return (f"最简帧：启动缓冲{config['startup_symbols']}，公共训练{config['training_symbols']}；"
@@ -1094,7 +1098,8 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
         for key in ('rise_s', 'fall_s'):
             frames[key] += origin
         result.sampling_note += (f" 依据前导实测拖尾及高电平稳定假设估计周期下限{pulse_options['estimated_min_period_us']:.3f}µs，"
-                                f"当前{1e6/symbol_hz:.3f}µs；器件稳定条件仍需实测。")
+                                f"当前{1e6/symbol_hz:.3f}µs；器件稳定条件仍需实测。 "
+                                +pulse_options.get('timing_note', '')+pulse_options.get('calibration_note', ''))
         if not result.decode_locked:
             result.frame_check.locked = False
             result.frame_check.reason = result.decode_note

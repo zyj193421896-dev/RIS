@@ -7,6 +7,10 @@ from rx706_gui import Rx706App
 
 
 class CaptureApp(Rx706App):
+    @staticmethod
+    def default_path():
+        return str(Path(__file__).resolve().parent/'captures'/Path(Rx706App.default_path()).name)
+
     def _build(self):
         super()._build()
         self.spectrum_button.destroy()

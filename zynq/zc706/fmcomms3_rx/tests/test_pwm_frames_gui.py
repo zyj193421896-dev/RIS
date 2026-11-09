@@ -40,6 +40,66 @@ class FrameGUITests(unittest.TestCase):
             self.root.destroy()
             self.assertEqual(self.callback_errors, [])
 
+    def test_fixed_data_button_loads_matching_configuration_without_file_dialog(self):
+        view = self.view
+        host = Path(__file__).resolve().parents[1]/'host'
+        profile = json.loads((host/'gui_data/current_pwm/frame.json').read_text(encoding='utf-8'))
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder/'frame.json').write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8')
+            (folder/'rx_test.bin').write_bytes(b'\0'*8)
+            latest = folder/'rx_20261109_235959_999.bin'
+            latest.write_bytes(b'\0'*8)
+            import os
+            os.utime(folder/'rx_test.bin', (100, 100))
+            os.utime(latest, (200, 200))
+            with patch('rx706_spectrum_gui.PWM_DATA_DIR', folder), \
+                 patch('rx706_spectrum_gui.filedialog.askopenfilename') as picker, \
+                 patch('rx706_spectrum_gui.messagebox.showerror') as error:
+                view.fixed_pwm_button.invoke()
+                error.assert_not_called()
+                picker.assert_not_called()
+            self.assertEqual(Path(view.filename.get()), latest)
+            self.assertEqual(view.pwm_polarity.get(), 'B=1')
+            self.assertEqual(view.first_tuple.get(), '0')
+            self.assertEqual(view.recovery_ms.get(), '1000')
+            c = view.pulse_config()
+            self.assertEqual(c['symbol_count'], 66)
+            self.assertEqual(c['frame_options']['users'][0]['identity'], (0, 0, 0, 0))
+            self.assertAlmostEqual(c['user_information_rates'][0], 169971.671*np.log2(66))
+            self.assertIn('前导计入', view.pwm_duty_summary.get())
+
+    def test_fixed_data_missing_pair_does_not_change_current_file(self):
+        view = self.view
+        view.filename.set('keep.bin')
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch('rx706_spectrum_gui.PWM_DATA_DIR', Path(tmp)), \
+             patch('rx706_spectrum_gui.messagebox.showerror') as error:
+            view.load_fixed_pwm_data()
+            error.assert_called_once()
+        self.assertEqual(view.filename.get(), 'keep.bin')
+
+    def test_cycle_calibration_and_quantizer_survive_gui_save_load_and_worker_options(self):
+        host = Path(__file__).resolve().parents[1]/'host'
+        view = self.view
+        view.load_frame_config(host/'gui_data/current_pwm/frame.json')
+        self.assertIn('循环已知码校准实验',view.pwm_duty_summary.get())
+        self.assertEqual(view.pwm2_protocol_options()['pulse_options']['cycle_calibration']['payload_indices'],[3,4,5,6])
+        view.pwm_width_quantization.set('脉宽向下取整')
+        self.assertEqual(view.pulse_config()['width_quantization'],'floor_width')
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)/'cycle.json'
+            with patch('rx706_spectrum_gui.filedialog.asksaveasfilename',return_value=str(target)):
+                view.save_frame_config()
+            saved = json.loads(target.read_text(encoding='utf-8'))
+            self.assertEqual(saved['width_quantization'],'floor_width')
+            self.assertEqual(saved['cycle_calibration']['symbols'],[3,4,5,6])
+            view.load_frame_config(target)
+            self.assertEqual(view.pulse_config()['width_quantization'],'floor_width')
+        view.load_frame_config(host/'gui_data/current_pwm/frame_original.json')
+        self.assertEqual(view.pwm_cycle_calibration,{})
+        self.assertEqual(view.pulse_config()['width_quantization'],'nearest')
+
     def test_pulse_rates_steps_and_removed_common_prefix_controls(self):
         import math
         view = self.view
@@ -57,7 +117,7 @@ class FrameGUITests(unittest.TestCase):
         self.assertEqual(str(view._pwm_count_widget['state']), 'readonly')
         view.pwm_frame_user_count.set('3')
         c = view.pulse_config()
-        self.assertAlmostEqual(c['user_information_rates'][0], 169971.671*math.log2(105)*1024/(3*1040))
+        self.assertAlmostEqual(c['user_information_rates'][0], 169971.671*math.log2(105)/3)
         view.pwm_duty_step.set('4')
         c = view.pulse_config()
         self.assertEqual(c['total_chips'], 25)

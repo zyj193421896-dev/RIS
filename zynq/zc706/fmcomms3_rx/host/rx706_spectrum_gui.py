@@ -4,6 +4,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+from pathlib import Path
 
 from rx706_spectrum import AnalysisCancelled, analyze_bin, display_trace
 
@@ -21,6 +22,7 @@ MODE_KINDS = {RECOVERY_MODE: 'periodic', PWM_MODE: 'pwm', PWM2_MODE: 'pwm2',
 PLOT_NAMES = ("总览", "频谱", "星座", "IQ 波形", "PWM 包络")
 PWM150_PRESET = '150k：净荷24%～72%，前导24%×3'
 PWM170_PRESET = '169.971671k：20%步长7%，8档温度计码'
+PWM_DATA_DIR = Path(__file__).resolve().parent/'gui_data/current_pwm'
 
 
 class SpectrumWindow:
@@ -109,6 +111,8 @@ class SpectrumWindow:
         self.pwm_joint_delay = tk.BooleanVar(value=True)
         self.pwm_low_guard_chips = tk.StringVar(value='1')
         self.pwm_pulse_codebook = tk.StringVar(value='')
+        self.pwm_width_quantization = tk.StringVar(value='左右区间（最近码字）')
+        self.pwm_cycle_calibration = {}
         self.pwm_duty_summary = tk.StringVar()
         self.pwm_auto_search = tk.BooleanVar(value=True)
         self.pwm_code_chips = tk.StringVar(value="8")
@@ -163,7 +167,9 @@ class SpectrumWindow:
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         browse = ttk.Button(path_row, text="打开 bin…", command=self.browse)
         browse.pack(side="left", padx=(0, 8))
-        self.controls.extend((entry, browse))
+        self.fixed_pwm_button = ttk.Button(path_row, text="加载固定 PWM 数据", command=self.load_fixed_pwm_data)
+        self.fixed_pwm_button.pack(side="left", padx=(0, 8))
+        self.controls.extend((entry, browse, self.fixed_pwm_button))
         self.analyze_button = ttk.Button(path_row, text="分析信号", command=self.analyze)
         self.analyze_button.pack(side="left", padx=(0, 8))
         self.stop_button = ttk.Button(path_row, text="停止", command=self.cancel.set, state="disabled")
@@ -349,10 +355,14 @@ class SpectrumWindow:
         codebook.grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='ew', pady=4)
         self._pulse_fields.append(codebook)
         self.controls.append(codebook)
+        quantizer = field(box, '补偿后脉宽判决', self.pwm_width_quantization,
+                          ('左右区间（最近码字）', '脉宽向下取整'))
+        self._pulse_fields.extend(box.grid_slaves(row=quantizer.grid_info()['row']))
         for variable in (self.pwm_duty_start, self.pwm_duty_step, self.pwm_duty_count,
                          self.pwm_min_high_chips, self.pwm_joint_delay, self.pwm_pulse_codebook):
             variable.trace_add('write', lambda *args: self.update_duty_summary())
         self.pwm_low_guard_chips.trace_add('write', lambda *args: self.update_duty_summary())
+        self.pwm_width_quantization.trace_add('write', lambda *args: self.update_duty_summary())
         self.pwm_symbol_khz.trace_add('write', lambda *args: self.update_duty_summary())
         self.update_duty_summary()
         field(box, "v1编码时间片数", self.pwm_code_chips, ("2", "4", "8", "16"), modes=(PWM_MODE,))
@@ -749,10 +759,16 @@ class SpectrumWindow:
                     '拖尾及周期下限待前导估计。\n'
                     f"末尾低电平预留{config['low_guard_chips']}片；合法组合{config['available_combinations']}种，当前码表{config['symbol_count']}种。\n"
                     f"每符号信息量 log₂(M)＝{config['information_bits']:.6f} bit。\n"
-                    f"含前导和时分开销的单用户净荷信息率上限：{rates}。\n"
+                    f"码元信息速率（前导计入；多用户按完整时隙分摊）：{rates}。\n"
                     f"逐符号固定整数映射最多{config['integer_payload_bits']} bit（需选2的整数次幂个码字）；当前输出为符号编号的二进制标记。\n"
                     '拖尾完全由各用户前导估计；数据脉冲可延后。')
                 self.pwm2_layout_summary.set(self.pwm_duty_summary.get())
+                self.pwm_duty_summary.set(self.pwm_duty_summary.get()+f'\n判决：{self.pwm_width_quantization.get()}。')
+                if config['cycle_calibration']:
+                    spec = config['cycle_calibration']
+                    self.pwm_duty_summary.set(self.pwm_duty_summary.get()+
+                        f"\n循环已知码校准实验：U{spec['user_id']}净荷位置{spec['payload_indices']}，"
+                        f"已知符号{spec['symbols']}；{spec['average_blocks']}块取中位数；这4个位置不计BER。")
                 return
             preamble_text = self.preamble_summary()
             _, values = duty_protocol(self.pwm_duty_start.get(), self.pwm_duty_step.get(),
@@ -875,7 +891,9 @@ class SpectrumWindow:
             min_high_chips=int(self.pwm_min_high_chips.get()),
             low_guard_chips=int(self.pwm_low_guard_chips.get()),
             joint_delay=self.pwm_joint_delay.get(),
-            codebook=self.pwm_pulse_codebook.get(), frame_options=self.frame_config())
+            codebook=self.pwm_pulse_codebook.get(), frame_options=self.frame_config(),
+            width_quantization='floor_width' if self.pwm_width_quantization.get() == '脉宽向下取整' else 'nearest',
+            cycle_calibration=self.pwm_cycle_calibration)
         return validate_pulse_options(config, float(self.pwm_symbol_khz.get())*1000)
 
     def configure_pulse_codebook(self):
@@ -1016,7 +1034,9 @@ class SpectrumWindow:
                     config.pop(key, None)
                 config.update(schema_version=3, mode='脉冲宽度与时延',
                     min_high_chips=self.pwm_min_high_chips.get(), low_guard_chips=self.pwm_low_guard_chips.get(),
-                    joint_delay=self.pwm_joint_delay.get(), codebook=self.pwm_pulse_codebook.get())
+                    joint_delay=self.pwm_joint_delay.get(), codebook=self.pwm_pulse_codebook.get(),
+                    width_quantization='floor_width' if self.pwm_width_quantization.get() == '脉宽向下取整' else 'nearest',
+                    cycle_calibration=self.pwm_cycle_calibration)
             filename = filedialog.asksaveasfilename(parent=self.window, title='保存发收端共用的帧配置', defaultextension='.json', filetypes=[('帧配置', '*.json')])
             if filename:
                 from pathlib import Path
@@ -1024,8 +1044,9 @@ class SpectrumWindow:
         except (OSError, ValueError) as exc:
             messagebox.showerror('保存失败', str(exc), parent=self.window)
 
-    def load_frame_config(self):
-        filename = filedialog.askopenfilename(parent=self.window, title='载入帧配置', filetypes=[('帧配置', '*.json')])
+    def load_frame_config(self, filename=None):
+        filename = filename or filedialog.askopenfilename(parent=self.window, title='载入帧配置',
+            initialdir=str(PWM_DATA_DIR), filetypes=[('帧配置', '*.json')])
         if not filename:
             return
         from pathlib import Path
@@ -1052,6 +1073,8 @@ class SpectrumWindow:
                 frames = dict(config, reference_format='bits' if config['reference_format'] == '二进制比特' else 'symbols')
                 validate_pulse_options(dict(config, step_percent=config['duty_step'], symbol_count=config['duty_count'],
                                            frame_options=frames), float(config['symbol_khz'])*1000)
+                self.pwm_cycle_calibration = config.get('cycle_calibration') or {}
+                self.pwm_width_quantization.set('脉宽向下取整' if config.get('width_quantization') == 'floor_width' else '左右区间（最近码字）')
                 mapping.update(min_high_chips='pwm_min_high_chips', low_guard_chips='pwm_low_guard_chips',
                     joint_delay='pwm_joint_delay',
                     codebook='pwm_pulse_codebook')
@@ -1064,7 +1087,7 @@ class SpectrumWindow:
                 self.constellation_mode.set(PWM2_MODE)
                 self.refresh_parameter_visibility()
                 self.update_duty_summary()
-                return
+                return True
             widths = duty_protocol(config['duty_start'], config['duty_step'], config['duty_count'])[0]['symbol_widths']
             validate_frame_options(dict(config, reference_format='bits' if config['reference_format'] == '二进制比特' else 'symbols'), widths)
             self.pwm_frame_users = config['users']
@@ -1075,8 +1098,32 @@ class SpectrumWindow:
             self.constellation_mode.set(PWM2_MODE)
             self.refresh_parameter_visibility()
             self.update_duty_summary()
+            return True
         except (OSError, ValueError, KeyError, TypeError) as exc:
             messagebox.showerror('载入失败', str(exc), parent=self.window)
+            return False
+
+    def load_fixed_pwm_data(self):
+        if self.busy:
+            return
+        profile = PWM_DATA_DIR/'frame.json'
+        candidates = [p for p in PWM_DATA_DIR.glob('rx_*.bin') if p.is_file()]
+        capture = max(candidates, key=lambda p: p.stat().st_mtime_ns) if candidates else PWM_DATA_DIR/'rx_test.bin'
+        if not profile.is_file() or not capture.is_file():
+            messagebox.showerror('固定数据未就绪', f'请将 frame.json 和 rx_test.bin 放入：\n{PWM_DATA_DIR}', parent=self.window)
+            return
+        if not self.load_frame_config(profile):
+            return
+        self.filename.set(str(capture))
+        self.channel.set('RX1')
+        self.first_tuple.set('0')
+        self.rate.set('15.36')
+        self.recovery_ms.set('1000')
+        self.pwm_polarity.set('B=1')
+        self.pwm_decimation.set('1')
+        self.result = self.recovery = None
+        self.summary.set('已加载固定采样与配套帧配置；点击“分析信号”重新解码。')
+        self.status.set(f'固定 PWM 数据（最新下载）：{capture.name}')
 
     def pwm2_protocol_options(self):
         if self.pwm2_input_mode.get() == '脉冲宽度与时延':
@@ -1228,7 +1275,7 @@ class SpectrumWindow:
 
     def browse(self):
         filename = filedialog.askopenfilename(parent=self.window, title="选择下载完成的 IQ bin 文件",
-            filetypes=[("原始 IQ", "*.bin"), ("所有文件", "*")])
+            initialdir=str(PWM_DATA_DIR), filetypes=[("原始 IQ", "*.bin"), ("所有文件", "*")])
         if filename:
             self.filename.set(filename)
 
@@ -1589,7 +1636,7 @@ class SpectrumWindow:
                                     zip(r.frame_options['users'], pulse['user_information_rates']))
                                 self.summary.set(r.calibration_description+'\n'+
                                     f"当前码表{pulse['symbol_count']}种；log₂(M)={pulse['information_bits']:.6f} bit/符号。\n"
-                                    f"含前导和时分开销的单用户净荷信息率上限：{rates}。\n"
+                                    f"码元信息速率（前导计入；多用户按完整时隙分摊）：{rates}。\n"
                                     f"输出{r.bits_per_symbol}位符号编号，仅{pulse['symbol_count']}种有效，不等于同位数独立净荷。\n"
                                     f"成功前导{len(tails)}个，实测拖尾范围{min(tails):.4f}～{max(tails):.4f}µs。\n"+
                                     f"按实测拖尾保守评估，完整落在符号内的码字最少{min(c['conservative_codewords'] for c in r.pulse_calibrations)}种；发送码表编号保持不变。\n"+
@@ -1760,6 +1807,9 @@ class SpectrumWindow:
         if r.pulse_options is not None:
             compact = ('index', 'user_id', 'block_id', 'delay_chips', 'corrected_high_chips',
                        'tail_us', 'symbol', 'bits', 'decision_estimated', 'reference_status', 'reason')
+            if r.pulse_options.get('cycle_calibration'):
+                compact = ('index', 'frame_part', 'user_id', 'block_id', 'delay_chips', 'corrected_high_chips',
+                           'width_scale', 'symbol', 'bits', 'reference_status', 'reason')
         tree.configure(displaycolumns=compact)
         tree.tag_configure('invalid', foreground='#b64720')
         tree.tag_configure('idle', foreground='#777777')

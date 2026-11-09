@@ -316,7 +316,7 @@ class Rx706App:
     @staticmethod
     def default_path():
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        return str(Path(__file__).resolve().parents[1] / "captures" / f"rx_{stamp}.bin")
+        return str(Path(__file__).resolve().parent / 'gui_data' / 'current_pwm' / f"rx_{stamp}.bin")
 
     def _build(self):
         style = ttk.Style()

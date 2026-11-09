@@ -1,0 +1,10 @@
+{
+  "rx_test.bin": {
+    "bytes": 122880000,
+    "sha256": "4808a9a33b5a11b618e0e8a9509a3fac2644338f47257b1f72753f885a13f6dd"
+  },
+  "rx_test.bin.json": {
+    "bytes": 24078,
+    "sha256": "17edd40f942e47825b60aa62670b56570e6a342724560f66ae5565a79a11528b"
+  }
+}

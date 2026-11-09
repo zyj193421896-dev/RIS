@@ -1,0 +1,242 @@
+{
+  "reference": {
+    "complete_blocks": 2427,
+    "partial_blocks": 1,
+    "identity_failures": 8,
+    "evaluated_blocks": 2427,
+    "bad_blocks": 2232,
+    "bit_errors": 1418,
+    "compared_bits": 1002519,
+    "erased_bits": 50799,
+    "unreferenced_blocks": 0,
+    "estimated_symbols": 2054,
+    "ber": 0.001414437033113587,
+    "bler": 0.9196538936959209
+  },
+  "by_width": [
+    {
+      "expected_width": 5,
+      "slots": 26697,
+      "erased": 4310,
+      "measured": 26570,
+      "raw_median": 5.330425340945711,
+      "corrected_median": 4.737481562053746,
+      "corrected_q10_q90": [
+        4.5653363056845055,
+        4.944578317427017
+      ],
+      "below_minimum_guard": 4183
+    },
+    {
+      "expected_width": 6,
+      "slots": 24270,
+      "erased": 110,
+      "measured": 24160,
+      "raw_median": 6.573855107364883,
+      "corrected_median": 5.892637176310123,
+      "corrected_q10_q90": [
+        5.748150391537344,
+        6.039879166364576
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 7,
+      "slots": 21843,
+      "erased": 100,
+      "measured": 21743,
+      "raw_median": 7.67858565116655,
+      "corrected_median": 6.918931293696686,
+      "corrected_q10_q90": [
+        6.771171603681338,
+        7.0664748938344975
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 8,
+      "slots": 16989,
+      "erased": 81,
+      "measured": 16908,
+      "raw_median": 8.828046655784966,
+      "corrected_median": 7.986892103918072,
+      "corrected_q10_q90": [
+        7.842056634482599,
+        8.138908853409136
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 9,
+      "slots": 14562,
+      "erased": 69,
+      "measured": 14493,
+      "raw_median": 9.936327652723534,
+      "corrected_median": 9.016859965156447,
+      "corrected_q10_q90": [
+        8.87428835960573,
+        9.156281216954044
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 10,
+      "slots": 12135,
+      "erased": 58,
+      "measured": 12077,
+      "raw_median": 10.995155874712717,
+      "corrected_median": 10.001778247902168,
+      "corrected_q10_q90": [
+        9.865415607351288,
+        10.145128470872253
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 11,
+      "slots": 9708,
+      "erased": 46,
+      "measured": 9662,
+      "raw_median": 12.058179692943062,
+      "corrected_median": 10.990435321142488,
+      "corrected_q10_q90": [
+        10.848024033396634,
+        11.135066382010276
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 12,
+      "slots": 9708,
+      "erased": 46,
+      "measured": 9662,
+      "raw_median": 13.127443007275549,
+      "corrected_median": 11.98399237244809,
+      "corrected_q10_q90": [
+        11.838044750915245,
+        12.129788332824228
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 13,
+      "slots": 7281,
+      "erased": 86,
+      "measured": 7195,
+      "raw_median": 14.210146601228743,
+      "corrected_median": 12.990604817007402,
+      "corrected_q10_q90": [
+        12.846057179605303,
+        13.136203554428606
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 14,
+      "slots": 4854,
+      "erased": 1194,
+      "measured": 3687,
+      "raw_median": 15.33970829829979,
+      "corrected_median": 14.038722969894438,
+      "corrected_q10_q90": [
+        13.895954488616791,
+        14.194270760871772
+      ],
+      "below_minimum_guard": 0
+    },
+    {
+      "expected_width": 15,
+      "slots": 2427,
+      "erased": 1157,
+      "measured": 1270,
+      "raw_median": 16.472569450219474,
+      "corrected_median": 15.093195602949447,
+      "corrected_q10_q90": [
+        14.943568922813549,
+        15.230745674703149
+      ],
+      "below_minimum_guard": 0
+    }
+  ],
+  "short_width_by_delay": [
+    {
+      "delay": 0,
+      "slots": 2427,
+      "erased": 511,
+      "raw_median": 5.2900033762246705,
+      "corrected_median": 4.699068850734334
+    },
+    {
+      "delay": 1,
+      "slots": 2427,
+      "erased": 9,
+      "raw_median": 5.578768386947518,
+      "corrected_median": 4.967214327259294
+    },
+    {
+      "delay": 2,
+      "slots": 2427,
+      "erased": 55,
+      "raw_median": 5.458663467891277,
+      "corrected_median": 4.856722236360276
+    },
+    {
+      "delay": 3,
+      "slots": 2427,
+      "erased": 174,
+      "raw_median": 5.37619387222731,
+      "corrected_median": 4.780827293827876
+    },
+    {
+      "delay": 4,
+      "slots": 2427,
+      "erased": 286,
+      "raw_median": 5.33545250933429,
+      "corrected_median": 4.743075917514292
+    },
+    {
+      "delay": 5,
+      "slots": 2427,
+      "erased": 393,
+      "raw_median": 5.3143570781773075,
+      "corrected_median": 4.7238008726394325
+    },
+    {
+      "delay": 6,
+      "slots": 2427,
+      "erased": 485,
+      "raw_median": 5.293313449152635,
+      "corrected_median": 4.704317201224428
+    },
+    {
+      "delay": 7,
+      "slots": 2427,
+      "erased": 572,
+      "raw_median": 5.274958913593482,
+      "corrected_median": 4.680334760175256
+    },
+    {
+      "delay": 8,
+      "slots": 2427,
+      "erased": 514,
+      "raw_median": 5.290594229992882,
+      "corrected_median": 4.6976489329628
+    },
+    {
+      "delay": 9,
+      "slots": 2427,
+      "erased": 459,
+      "raw_median": 5.298498578436282,
+      "corrected_median": 4.7051147443848045
+    },
+    {
+      "delay": 10,
+      "slots": 2427,
+      "erased": 852,
+      "raw_median": 5.235379819543892,
+      "corrected_median": 4.649123438097748
+    }
+  ],
+  "reference_used_for_diagnostics_only": true,
+  "combined_error_or_erasure_rate": 0.049573822910080334
+}

@@ -73,6 +73,147 @@ def screenshot_case():
 
 
 class PulseTests(unittest.TestCase):
+    def test_short_measured_pulse_from_four_chips_maps_to_five_without_hiding_missing_pulses(self):
+        fs, rate, tail = 15.36e6, 169971.671, .1e-6
+        chosen = config(payload=7)
+        chosen.update(min_high_chips=5,low_guard_chips=5)
+        chosen['frame_options']['users'][0].update(identity='0 0 0 0',reference='51 56 51 51 51 51 51')
+        chosen['frame_options']['reference_enabled']=True
+        c=validate_pulse_options(chosen,rate,fs)
+        book=np.asarray(c['codebook'])
+        sent=np.r_[np.zeros(4,int),[51,56,51,51,51,51,51]]
+        chip,origin=1/rate/20,.37/rate
+        rises=origin+(np.arange(len(sent))+book[sent,0]/20)/rate
+        widths=book[sent,1].copy()
+        widths[4:]=[4.5544,4.5765,4.5,4.4999,4.1,4.,3.9999]
+        falls=rises+widths*chip+tail
+        t=np.arange(int((origin+(len(sent)+.8)/rate)*fs))/fs
+        at=np.searchsorted(rises,t,side='right')-1
+        high=(at>=0)&(t<falls[np.maximum(at,0)])
+        edges=np.r_[rises,falls]
+        after=np.r_[np.ones(len(sent),bool),np.zeros(len(sent),bool)]
+        order=np.argsort(edges)
+        rows,_,_,_=decode_pulses(high,edges[order],after[order],t,fs,rate,c)
+        np.testing.assert_array_equal(rows['symbol'][4:10],[51,56,51,51,51,51])
+        self.assertTrue(np.all(rows['valid'][4:10]))
+        self.assertTrue(np.all(rows['decision_estimated'][4:10]))
+        self.assertFalse(rows['valid'][10])
+        checked=check_frame_reference(rows,c['frame_options'],tuple(w for _,w in book),tuple(format(k,'07b') for k in range(66)))
+        self.assertEqual(checked.overall['compared_bits'],42)
+        self.assertEqual(checked.overall['bit_errors'],0)
+        self.assertEqual(checked.overall['erased_bits'],7)
+        strict,_,_,_=decode_pulses(high,edges[order],after[order],t,fs,rate,dict(c,nearest_decision=False))
+        self.assertFalse(np.any(strict['valid'][4:]))
+        # A completely missing measured pulse still has no candidate/decision.
+        keep=np.ones(len(edges),bool)
+        keep[[4,4+len(sent)]]=False
+        reduced=np.argsort(edges[keep])
+        missing,_,_,_=decode_pulses(high,edges[keep][reduced],after[keep][reduced],t,fs,rate,c)
+        self.assertFalse(missing['valid'][4])
+        self.assertEqual(missing['candidate_symbol'][4],-1)
+
+    def test_four_reserved_cycle_slots_calibrate_without_reference_and_are_not_scored(self):
+        rate, fs, gain, offset = 169971.671, 15.36e6, 1.10, .04e-6
+        chosen = config(payload=66)
+        chosen.update(min_high_chips=5, low_guard_chips=5, cycle_calibration=dict(
+            user_id=1, payload_indices=[3,4,5,6], symbols=[3,4,5,6], average_blocks=4))
+        chosen['frame_options']['users'][0].update(identity='0 0 0 0', reference=' '.join(map(str,range(66))))
+        chosen['frame_options']['reference_enabled'] = True
+        c = validate_pulse_options(chosen, rate, fs)
+        sent = np.tile(np.r_[np.zeros(4,int),np.arange(66)],6)
+        book, chip, origin = np.asarray(c['codebook']), 1/rate/20, .37/rate
+        rises = origin+(np.arange(len(sent))+book[sent,0]/20)/rate
+        falls = rises+gain*book[sent,1]*chip+offset
+        t = np.arange(int((origin+(len(sent)+.8)/rate)*fs))/fs
+        at = np.searchsorted(rises,t,side='right')-1
+        high = (at>=0) & (t<falls[np.maximum(at,0)])
+        edges = np.r_[rises,falls]
+        after = np.r_[np.ones(len(sent),bool),np.zeros(len(sent),bool)]
+        order = np.argsort(edges)
+        rows, _, calibrated, learned = decode_pulses(high,edges[order],after[order],t,fs,rate,c)
+        payload = rows['frame_part']=='净荷'
+        pilots = rows['frame_part']=='校准前导'
+        self.assertEqual(int(payload.sum()),6*62)
+        self.assertEqual(int(pilots.sum()),6*4)
+        self.assertTrue(np.all(rows['valid'][payload]))
+        self.assertFalse(np.any(rows['valid'][pilots]))
+        np.testing.assert_array_equal(rows['symbol'][payload],rows['payload_index'][payload])
+        np.testing.assert_allclose([x['width_gain'] for x in calibrated],gain)
+        checked = check_frame_reference(rows,c['frame_options'],tuple(w for _,w in c['codebook']),tuple(format(k,'07b') for k in range(66)))
+        self.assertEqual(checked.overall['compared_bits'],6*62*7)
+        self.assertEqual(checked.overall['erased_bits'],0)
+        self.assertEqual(checked.overall['bad_blocks'],0)
+        self.assertTrue(all(s=='校准前导/不统计' for s in checked.row_status[pilots]))
+        changed = dict(c,frame_options=dict(c['frame_options'],users=[dict(c['frame_options']['users'][0],reference='65 '*66)]))
+        other, _, recalibrated, _ = decode_pulses(high,edges[order],after[order],t,fs,rate,changed)
+        np.testing.assert_array_equal(rows['symbol'],other['symbol'])
+        np.testing.assert_allclose(rows['corrected_high_chips'],other['corrected_high_chips'])
+        self.assertEqual(calibrated,recalibrated)
+
+    def test_width_floor_preserves_fractional_delay_and_interval_mode(self):
+        pairs = np.asarray([(0,8),(0,9),(0,10)],float)
+        self.assertEqual(_nearest_codeword(0,8.6,pairs,True,.4)[0],1)
+        self.assertEqual(_nearest_codeword(0,8.6,pairs,True,.4,'floor_width')[0],0)
+        self.assertEqual(_nearest_codeword(.99,6.2,np.asarray([(0,6),(1,6)]),True,.4,'floor_width')[0],1)
+
+    def test_cycle_pilot_configuration_rejects_duplicate_or_untransmitted_slots(self):
+        for positions,symbols in [([3,3,5,6],[3,4,5,6]),([3,4,5,999],[3,4,5,6]),([3,4,5,6],[0,0,0,0])]:
+            with self.subTest(positions=positions), self.assertRaises(ValueError):
+                validate_pulse_options(dict(config(),cycle_calibration=dict(payload_indices=positions,symbols=symbols)),169971.671)
+
+    def test_repeated_marker_cannot_jump_into_identical_first_payload(self):
+        c = config(payload=66)
+        c.update(min_high_chips=5, low_guard_chips=5)
+        c['frame_options'].update(identity_errors=1)
+        c['frame_options']['users'][0]['identity'] = '0 0 0 0'
+        c = validate_pulse_options(c, 169971.671, 15.36e6)
+        book, rate, fs = np.asarray(c['codebook']), 169971.671, 15.36e6
+        sent = np.tile(np.r_[np.zeros(4, int), np.arange(66)], 4)
+        chip, origin = 1/rate/20, .37/rate
+        rises = origin+(np.arange(len(sent))+book[sent, 0]/20)/rate
+        falls = rises+book[sent, 1]*chip+.1e-6
+        # The trailing four identical pulses have a cleaner fit, but are NOT
+        # the header. Their selection would move every payload by one slot.
+        rises[::70] -= .8*chip
+        falls[::70] -= .8*chip
+        t = np.arange(int((origin+(len(sent)+.8)/rate)*fs))/fs
+        at = np.searchsorted(rises, t, side='right')-1
+        high = (at >= 0) & (t < falls[np.maximum(at, 0)])
+        edges = np.r_[rises, falls]
+        after = np.r_[np.ones(len(sent), bool), np.zeros(len(sent), bool)]
+        order = np.argsort(edges)
+        rows, measured, calibrated, learned = decode_pulses(high, edges[order], after[order], t, fs, rate, c)
+        payload = rows['frame_part'] == '净荷'
+        self.assertTrue(np.all(rows['valid'][payload]))
+        np.testing.assert_array_equal(rows['symbol'][payload], np.tile(np.arange(66), 4))
+        self.assertAlmostEqual(measured, rate, places=4)
+        self.assertEqual(len(calibrated), 4)
+        self.assertIn('前导重复', learned['timing_note'])
+        self.assertIn('无法识别', learned['calibration_note'])
+
+    def test_two_width_preamble_identifies_affine_gain_without_payload_reference(self):
+        chosen = config(payload=66)
+        chosen.update(min_high_chips=5, low_guard_chips=5)
+        chosen['frame_options']['users'][0]['identity'] = '0 5 0 5'
+        fs, rate, gain, offset = 15.36e6, 169971.671, 1.12, .08e-6
+        c, sent, rises, _, t, _, origin = synthesize(chosen, rounds=3, tail_us=0)
+        book = np.asarray(c['codebook'])
+        falls = rises+gain*book[sent, 1]/20/rate+offset
+        at = np.searchsorted(rises, t, side='right')-1
+        high = (at >= 0) & (t < falls[np.maximum(at, 0)])
+        edges = np.r_[rises, falls]
+        after = np.r_[np.ones(len(sent), bool), np.zeros(len(sent), bool)]
+        order = np.argsort(edges)
+        rows, _, calibrated, learned = decode_pulses(high, edges[order], after[order], t, fs, rate, c)
+        payload = rows['frame_part'] == '净荷'
+        indices = np.rint((rows['start_s'][payload]-origin)*rate).astype(int)
+        self.assertTrue(np.all(rows['valid'][payload]))
+        np.testing.assert_array_equal(rows['symbol'][payload], sent[indices])
+        self.assertTrue(all(item['width_gain_identified'] for item in calibrated))
+        np.testing.assert_allclose([item['width_gain'] for item in calibrated], gain)
+        np.testing.assert_allclose([item['width_offset_us'] for item in calibrated], offset*1e6)
+        self.assertIn('多种重复脉宽', learned['calibration_note'])
+
     def test_short_preamble_slope_cannot_drift_payload_or_later_header_search(self):
         fs, rate = 15.36e6, 213980.029
         chosen = config(payload=1024)
@@ -189,10 +330,11 @@ class PulseTests(unittest.TestCase):
 
     def test_rate_includes_preamble_and_per_user_slot_lengths(self):
         c = validate_pulse_options(config(users=3, payload=1024), 169971.671)
-        expected = 169971.671*math.log2(36)*1024/(3*1040)
+        expected = 169971.671*math.log2(36)/3
         np.testing.assert_allclose(c['user_information_rates'], [expected]*3)
         one = validate_pulse_options(config(payload=1024), 169971.671)
         self.assertAlmostEqual(one['user_information_rates'][0], 3*expected)
+        self.assertAlmostEqual(one['coded_information_rate'], 169971.671*math.log2(36))
 
     def test_identity_only_acquires_at_arbitrary_capture_offset_and_estimates_tail(self):
         fs, rate = 15.36e6, 169971.671
