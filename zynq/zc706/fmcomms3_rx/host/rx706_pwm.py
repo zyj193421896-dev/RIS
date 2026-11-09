@@ -38,7 +38,8 @@ def _frame_dtype(bit_width, total_chips, training=False, pattern=False):
             for name, dtype in FRAME_DTYPE]
     if training:
         from rx706_pwm_training import TRAINING_FIELDS
-        fields += TRAINING_FIELDS
+        from rx706_pwm_frames import FRAME_FIELDS
+        fields += TRAINING_FIELDS+FRAME_FIELDS
     elif pattern:
         fields += [('raw_reason', 'U64'), ('structure_ok', '?')]
     return fields
@@ -88,6 +89,12 @@ class PWMRecovery:
     prefix_chips: int = 0
     training_calibration: object = None
     decision_mode: str = 'width'
+    symbol_widths: object = None
+    output_binary: bool = False
+    frame_check: object = None
+    frame_options: object = None
+    pulse_options: object = None
+    pulse_calibrations: object = None
 
     @property
     def kind(self):
@@ -99,12 +106,74 @@ class PWMRecovery:
 
     @property
     def protocol_label(self):
+        if self.output_binary:
+            return f'PWM占空比（{len(self.symbol_widths)}态）'
         return (f'PWM version2 ({self.prefix_chips}+{self.code_chips}+{self.guard_chips})'
                 if self.version == 2 else f'PWM ({self.code_chips}+{self.guard_chips})')
 
     @property
     def symbol_bitwords(self):
+        if self.output_binary:
+            return tuple(format(k, f'0{self.bits_per_symbol}b') for k in range(len(self.symbol_widths)))
+        if self.symbol_widths is not None:
+            return tuple('1'*(width-self.prefix_chips)+'0'*(self.total_chips-self.guard_chips-width)
+                         for width in self.symbol_widths)
         return tuple('1'*k+'0'*(self.code_chips-k) for k in range(self.code_chips+1)) if self.version == 2 else None
+
+    @property
+    def calibration_description(self):
+        """Describe the settings actually used by this result, not live GUI edits."""
+        if self.pulse_options is not None:
+            return (f"用户身份前导＋净荷；{self.frame_options['user_count']}用户；"
+                    f"步长{self.pulse_options['step_percent']:g}%→{self.total_chips}片；"
+                    f"最小高电平{self.pulse_options['min_high_chips']}片。"
+                    '每个身份前导独立估计下降沿拖尾和符号边界，无公共训练。')
+        if self.frame_options is not None:
+            config = self.frame_options
+            return (f"最简帧：启动缓冲{config['startup_symbols']}，公共训练{config['training_symbols']}；"
+                    f"{config['user_count']}用户，按配置顺序轮询。公共训练直接标定档位，身份码兼作块定位。")
+        cal = self.training_calibration
+        if cal is None:
+            return '本次前导校准未启用。'
+        widths = cal.get('preamble_widths')
+        if widths is None:
+            return '本次使用旧接口20%三连训练。'
+        from rx706_pwm_protocol import parse_preamble_widths
+        duties = [100*w/self.total_chips for w in parse_preamble_widths(widths, self.total_chips)]
+        preamble = '、'.join(f'{d:g}%' for d in duties[:16])+('…' if len(duties)>16 else '')
+        count = cal.get('payload_symbols', 0)
+        framing = f'每帧净荷 {count}' if count else '未固定帧长（连续同宽前导与净荷可能有歧义）'
+        source = '拟合时钟测宽' if cal.get('clock_width', False) else '边沿测宽'
+        if np.ptp(duties) > 1e-9:
+            spacing = '多宽前导校准比例与偏移'
+        elif cal.get('auto_scale', False):
+            spacing = f"自动档位标定已启用；{cal['spacing_symbols']}行已标定，初期仅前导偏移"
+        else:
+            spacing = '自动档位标定已关闭；同宽前导只校准偏移'
+        uncertainty = cal.get('measurement_uncertainty_chips', 0.)
+        return (f'本次前导 {preamble}；{framing}；{source}；{spacing}。'
+                f'前导匹配另计采样测宽余量 {uncertainty:.3f}片（原始宽度）。')
+
+    def duty_thermometer(self, row):
+        """Map a confirmed duty level to unary display, separate from bits.
+
+        This is a level mapping, not a measurement of physical time slots.
+        Candidates never turn erasures into confirmed display words.
+        """
+        if not self.output_binary or self.symbol_widths is None:
+            return ''
+        if row['symbol'] in (-2, -3):
+            return '-'
+        count = len(self.symbol_widths)
+        if not row['valid'] or not 0 <= row['symbol'] < count:
+            return '?'*count
+        high = int(row['symbol'])+1
+        return '1'*high+'0'*(count-high)
+
+    def width_symbol(self, high):
+        if self.symbol_widths is None:
+            return high-self.prefix_chips
+        return self.symbol_widths.index(high) if high in self.symbol_widths else -1
 
 
 def _two_states(z, cancel_event=None):
@@ -322,7 +391,8 @@ def _deglitch_runs(edges, levels, limit, budget):
 
 def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
             code_chips, guard_chips, tolerance, cancel_event, glitch_tolerance_chips=.15,
-            prefix_chips=0, training_options=None, clock_start_s=0., decision_mode='width'):
+            prefix_chips=0, training_options=None, clock_start_s=0., decision_mode='width', width_alphabet=None,
+            nearest_level=False):
     total_chips = prefix_chips+code_chips+guard_chips
     bit_width = code_chips if prefix_chips else int(math.log2(code_chips))
     minimum_high = prefix_chips or 1
@@ -337,7 +407,14 @@ def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
     fit_rise = rise[rise >= clock_start_s]
     if len(fit_rise) < 3:
         raise ValueError('校准窗后的稳定上升沿不足3个')
-    slope, anchor = _fit_clock(fit_rise, symbol_hz, total_chips, cancel_event)
+    timing_unit = (float(min(np.min(np.diff(sorted(width_alphabet))), min(width_alphabet),
+                             total_chips-max(width_alphabet)))
+                   if width_alphabet is not None and len(width_alphabet) > 1 else 1.)
+    if training_options is not None and 'preamble_widths' in training_options:
+        from rx706_pwm_protocol import parse_preamble_widths
+        preamble = parse_preamble_widths(training_options['preamble_widths'], total_chips)
+        timing_unit = min(timing_unit, min(preamble), total_chips-max(preamble))
+    slope, anchor = _fit_clock(fit_rise, symbol_hz, total_chips/timing_unit, cancel_event)
     if abs(slope/nominal_period-1) > .02:
         raise ValueError('测得符号率偏离设置超过 2%，请核对符号率与时间片数')
     period, chip = float(slope), float(slope/total_chips)
@@ -353,13 +430,26 @@ def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
     nearest = np.minimum(nearest, len(rise)-1)
     prior = np.maximum(nearest-1, 0)
     nearest = np.where(abs(rise[prior]-expected) < abs(rise[nearest]-expected), prior, nearest)
-    starts = np.where(abs(rise[nearest]-expected) <= .35*chip, rise[nearest], expected)
+    edge_margin = .35*chip*timing_unit
+    rise_margin = edge_margin
+    if width_alphabet is not None:
+        # Alphabet spacing controls level resolution, not the timing shift of
+        # a measured rising edge after a long high pulse. Bound association by
+        # the shortest configured physical high/low pulse instead. Interior
+        # transition checks retain their existing, narrower exclusion margin.
+        shortest_pulse = min(min(width_alphabet), total_chips-max(width_alphabet))
+        if training_options is not None and 'preamble_widths' in training_options:
+            shortest_pulse = min(shortest_pulse, min(preamble), total_chips-max(preamble))
+        rise_margin = .35*chip*shortest_pulse
+    starts = np.where(abs(rise[nearest]-expected) <= rise_margin, rise[nearest], expected)
     ends = np.r_[starts[1:], anchor+last*period]
     frames = np.zeros(len(indices), dtype=_frame_dtype(bit_width, total_chips,
-        training_options is not None, decision_mode == 'pattern'))
+        training_options is not None, decision_mode == 'pattern' or width_alphabet is not None))
     frames['symbol'] = -1
     frames['bits'] = '?'*bit_width
     frames['one_us'] = frames['zero_us'] = frames['high_chips'] = np.nan
+    if training_options is not None:
+        frames['clock_high_chips'] = np.nan
     # Integrate the measured decisions at full processing rate, rather than
     # selecting one sample per slot or using a plotted/decimated view.
     integral = np.r_[0., np.cumsum(states, dtype=float)]/fs
@@ -391,9 +481,9 @@ def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
         clean_after = clean_levels[1:]
         # Preserve the existing symbol-edge uncertainty margins. A noisy
         # boundary must not be reinterpreted as a newly invalid data transition.
-        interior = clean_after[(clean_times >= start+.35*chip) & (clean_times < end-.35*chip)]
+        interior = clean_after[(clean_times >= start+edge_margin) & (clean_times < end-edge_margin)]
         falling = np.flatnonzero(clean_levels[:-1] & ~clean_levels[1:] &
-                                 (clean_times >= start+.35*chip))+1
+                                 (clean_times >= start+edge_margin))+1
         if not len(falling):
             row['reason'] = '没有完整的 1→0 边沿'
             continue
@@ -403,14 +493,16 @@ def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
         number = int(math.floor(high+.5))
         row['one_us'], row['zero_us'] = one*1e6, zero*1e6
         row['high_chips'], row['duty_percent'] = high, 100*one/(end-start)
+        if training_options is not None:
+            row['clock_high_chips'] = (main_fall-expected[i])/chip
         reason = ''
-        if abs(rise[nearest[i]]-expected[i]) > .35*chip:
+        if abs(rise[nearest[i]]-expected[i]) > rise_margin:
             reason = '符号起点缺少上升沿'
         elif exceeded:
             reason = '短毛刺累计超过0.30个时间片'
         elif len(interior) != 1 or bool(interior[0]):
             reason = '存在未能忽略的额外跳变'
-        if training_options is not None or decision_mode == 'pattern':
+        if training_options is not None or decision_mode == 'pattern' or width_alphabet is not None:
             row['structure_ok'] = not bool(reason)
         if not reason and not minimum_high <= number <= maximum_high:
             reason = '固定高电平保护不足或脉宽超范围' if prefix_chips else '高电平长度超出编码范围'
@@ -428,13 +520,35 @@ def _decode(states, transition_times, transition_states, times, fs, symbol_hz,
                            if prefix_chips else format(number-1, f'0{bit_width}b'))
     if training_options is not None:
         from rx706_pwm_training import apply_training
+        # Both the falling edge and the origin (measured or clock-fitted from
+        # rising edges) have timing uncertainty. Budget half a processing
+        # sample for each; fitting a clock does not make its origin exact.
+        uncertainty = 1./(fs*chip)
         apply_training(frames, total_chips, prefix_chips, code_chips, guard_chips,
-                       tolerance, training_options, cancel_event)
+                       tolerance, training_options, cancel_event,
+                       measurement_uncertainty_chips=uncertainty)
     if decision_mode == 'pattern':
         if training_options is None:
             frames['raw_reason'] = frames['reason']
         apply_pattern_decisions(frames, total_chips, code_chips, prefix_chips,
                                 guard_chips, training_options is not None, cancel_event)
+    if width_alphabet is not None and decision_mode == 'width':
+        from rx706_pwm_protocol import apply_alphabet_decisions
+        apply_alphabet_decisions(frames, width_alphabet, prefix_chips, code_chips, tolerance,
+                                 training_options is not None, nearest=nearest_level)
+        if (training_options is not None and training_options.get('auto_scale', False) and
+                'preamble_widths' in training_options):
+            from rx706_pwm_protocol import parse_preamble_widths
+            preamble = parse_preamble_widths(training_options['preamble_widths'], total_chips)
+            if np.ptp(preamble) <= 1e-9:
+                warming = (frames['valid'] & (frames['calibration_id'] > 0) &
+                           (frames['calibration_source'] != '前导＋档位标定'))
+                frames['reason'][warming] = np.char.add(frames['reason'][warming],
+                                                       '；档位标定预热，仅前导偏移')
+    if training_options is not None and 'frame_options' in training_options:
+        failed = (frames['frame_part'] == '净荷') & ~frames['identity_ok']
+        frames['valid'][failed], frames['symbol'][failed], frames['bits'][failed] = False, -1, '?'*bit_width
+        frames['reason'][failed] = '身份码失败：净荷按擦除保位'
     return frames, 1/period
 
 
@@ -490,7 +604,7 @@ def _candidate_decisions(frames, code_chips, prefix_chips=0, decision_mode='widt
     for row in frames:
         if row['symbol'] == -3:
             row['candidate_symbol'], row['candidate_bits'] = -3, '-'
-            row['candidate_source'] = '20%三连训练段，不输出净荷'
+            row['candidate_source'] = '训练前导段，不输出净荷'
             continue
         if row['symbol'] == -2:
             row['candidate_symbol'], row['candidate_bits'] = -2, '-'
@@ -655,7 +769,7 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
                 glitch_tolerance_chips=.15, cancel_event=None, allow_unlocked=False,
                 auto_search=False, _seed_offset=0, _version=1,
                 _prefix_chips=8, _total_chips=20, _search_probe=False, training_options=None,
-                decision_mode='width'):
+                decision_mode='width', symbol_widths=None, output_binary=False, pulse_options=None):
     """Measure 0/1 duration and decode PWM without assuming a 50% duty cycle.
 
     Carrier initialization compares raw/squared spectral-line candidates.
@@ -664,20 +778,38 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
     still needed for absolute labels, packet framing and measured BER.
     """
     fs = float(spectrum.sample_rate_hz)
+    pulse_calibrations, pulse_choices = None, {}
+    if pulse_options is not None:
+        from rx706_pwm_pulse import validate_pulse_options
+        pulse_options = validate_pulse_options(pulse_options, symbol_hz, fs/decimation)
+        _version, _total_chips, _prefix_chips = 2, pulse_options['total_chips'], 0
+        code_chips, guard_chips = _total_chips, 0
+        symbol_widths = tuple(w for _, w in pulse_options['codebook'])
+        output_binary, training_options, auto_search = True, None, False
     if not math.isfinite(float(symbol_hz)) or symbol_hz <= 0:
         raise ValueError('PWM 符号率必须为有限正数')
     if decision_mode not in ('width', 'pattern') or (_version != 2 and decision_mode != 'width'):
         raise ValueError('时间片码型判决仅支持PWM version2；判决依据须为width或pattern')
     prefix_chips = _prefix_chips if _version == 2 else 0
-    if _version == 2:
+    if _version == 2 and pulse_options is None:
         code_chips = pwm2_layout(_total_chips, prefix_chips, guard_chips)
-    elif type(code_chips) is not int or code_chips not in (2, 4, 8, 16):
+    if symbol_widths is not None and pulse_options is None:
+        if _version != 2:
+            raise ValueError('自定义符号映射仅支持PWM version2')
+        from rx706_pwm_protocol import parse_widths
+        symbol_widths = parse_widths(symbol_widths, _total_chips, minimum=prefix_chips,
+                                    maximum=_total_chips-guard_chips)
+        if len(set(symbol_widths)) != len(symbol_widths):
+            raise ValueError('符号映射表中的高片数不能重复')
+        if training_options is not None:
+            training_options = dict(training_options, alphabet_widths=symbol_widths)
+    if _version != 2 and (type(code_chips) is not int or code_chips not in (2, 4, 8, 16)):
         raise ValueError('编码片数必须为 2、4、8 或 16')
     if training_options is not None:
         if _version != 2:
             raise ValueError('三连训练补偿仅支持PWM version2')
         from rx706_pwm_training import validate_training
-        validate_training(prefix_chips+code_chips+guard_chips, prefix_chips, code_chips, training_options)
+        training_target, _ = validate_training(prefix_chips+code_chips+guard_chips, prefix_chips, code_chips, training_options)
     if _version != 2 and (type(guard_chips) is not int or not 1 <= guard_chips <= 16):
         raise ValueError('保护片数必须为 1～16 的整数')
     if decimation not in (1, 2, 4, 8, 16):
@@ -691,23 +823,35 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
     if not math.isfinite(float(glitch_tolerance_chips)) or not 0 <= glitch_tolerance_chips < .5:
         raise ValueError('单次毛刺上限必须大于等于0且小于0.5个时间片；0表示严格模式')
     chip_rate = symbol_hz*(prefix_chips+code_chips+guard_chips)
-    points_per_chip = fs/decimation/chip_rate
+    spacing = (1 if pulse_options is not None else min(min(np.diff(sorted(symbol_widths))), min(symbol_widths),
+                   _total_chips-max(symbol_widths))
+               if symbol_widths is not None and len(symbol_widths) > 1 else 1)
+    if training_options is not None:
+        targets = np.atleast_1d(training_target)
+        spacing = min(spacing, float(targets.min()), prefix_chips+code_chips+guard_chips-float(targets.max()))
+    points_per_chip = fs/decimation/chip_rate*spacing
     if points_per_chip < 3:
+        if symbol_widths is not None:
+            raise ValueError(f'最小占空比间隔或最短高/低脉冲仅{points_per_chip:.3f}个IQ点，至少需要3点；'
+                             '请提高实际采样率、降低方波频率，或增大占空比间隔。')
         raise ValueError(f'Fs={fs/1e6:g} MS/s，抽取{decimation}倍，PWM={symbol_hz/1000:g} kHz，'
                          f'{prefix_chips}+{code_chips}+{guard_chips}片：每片只有{points_per_chip:.3f}个IQ点。'
                          '当前插值判决至少需要3点/片，建议4点以上；请减小抽取倍数，'
                          '或提高实际采集采样率/降低符号率。修改文件的Fs标签不能增加采样点。')
     sampling_note = (f'每时间片{points_per_chip:.3f}个IQ点，低于建议的4点；使用原始点间边沿插值，'
                      '计时余量较小，请结合波形和擦除比例判断可靠性。' if points_per_chip < 4 else '')
+    if symbol_widths is not None and points_per_chip < 4:
+        sampling_note = f'最小占空比间隔/最短脉冲{points_per_chip:.3f}个IQ点，低于建议4点；请结合擦除比例判断。'
     search_note = ''
-    if auto_search:
+    if auto_search and not (training_options is not None and 'frame_options' in training_options):
         spectrum, duration_s, search_note = _find_pwm_span(spectrum, duration_s,
             symbol_hz=symbol_hz, code_chips=code_chips, guard_chips=guard_chips,
             center_hint_hz=center_hint_hz, decimation=decimation,
             state_one=state_one, width_tolerance=width_tolerance, hysteresis=hysteresis,
             glitch_tolerance_chips=glitch_tolerance_chips, cancel_event=cancel_event, _version=_version,
             _prefix_chips=prefix_chips, _total_chips=prefix_chips+code_chips+guard_chips,
-            training_options=training_options, decision_mode=decision_mode)
+            training_options=training_options, decision_mode=decision_mode, symbol_widths=symbol_widths,
+            output_binary=output_binary)
     # PWM may process a complete one-second span; other recovery modes keep
     # their existing bounded read. Search probes always remain small.
     x, count, clipped = _read_span(spectrum, duration_s, center_hint_hz, cancel_event,
@@ -787,14 +931,27 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
         level = states if one == 1 else ~states
         after = next_states if one == 1 else ~next_states
         try:
-            frames, measured = _decode(level, transitions, after, times, rate, symbol_hz,
+            if pulse_options is not None:
+                from rx706_pwm_pulse import decode_pulses
+                frames, measured, calibrations, normalized = decode_pulses(level, transitions, after,
+                    times, rate, symbol_hz, pulse_options, cancel_event)
+                pulse_choices[one] = calibrations, normalized
+            else:
+                frames, measured = _decode(level, transitions, after, times, rate, symbol_hz,
                                        code_chips, guard_chips, width_tolerance, cancel_event,
                                        glitch_tolerance_chips, prefix_chips, training_options,
-                                       max(0., _seed_offset/fs-offset), decision_mode)
+                                       max(0., _seed_offset/fs-offset), decision_mode, symbol_widths,
+                                       nearest_level=output_binary)
             active = frames['symbol'] != -2
             if training_options is not None:
                 active &= ~frames['training'] & (frames['calibration_id'] > 0)
             score = float(np.mean(frames['valid'][active])) if np.any(active) else 0.
+            if training_options is not None and 'frame_options' in training_options:
+                # A successfully acquired known prefix establishes polarity even
+                # when every subsequent payload decision is an erasure.
+                score += 2*bool(np.any(frames['block_id'] > 0))
+            if pulse_options is not None:
+                score += 2*bool(np.any(frames['block_id'] > 0))
             choices.append((score, one, frames, measured))
         except ValueError:
             if state_one != 'auto':
@@ -804,14 +961,18 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
                          +_clock_hint(transitions, next_states))
     choices.sort(key=lambda item: item[0], reverse=True)
     score, one, frames, measured = choices[0]
+    if pulse_options is not None:
+        pulse_calibrations, pulse_options = pulse_choices[one]
     ambiguous = len(choices) > 1 and score-choices[1][0] < .15
     fixed = [np.unique(item[2]['symbol'][item[2]['valid']]) for item in choices]
     equivalent = (len(fixed) == 2 and len(fixed[0]) == len(fixed[1]) == 1
                   and fixed[0][0] == fixed[1][0])
     decode_note = ''
-    if training_options is not None and not np.any(frames['training']):
-        decode_note = '未检测到连续3个同宽20%训练符号，未进行补偿或输出净荷。'
-    elif training_options is not None and not np.any(frames['valid']):
+    if training_options is not None and 'frame_options' in training_options and not np.any(frames['block_id'] > 0):
+        decode_note = '最简帧未定位：公共训练或首个用户身份码未匹配；请核对帧配置和恢复起点。'
+    elif training_options is not None and not np.any(frames['training']):
+        decode_note = '未锁定：未检测到有效的已配置训练前导，未进行补偿或输出净荷。'
+    elif training_options is not None and 'frame_options' not in training_options and not np.any(frames['valid']):
         decode_note = '检测到训练但没有通过校准后判决的数据符号。'
     elif state_one == 'auto' and score < .5:
         decode_note = (f'候选时钟{measured/1000:.6f} kHz；PWM编码符合比例仅{score:.1%}，'
@@ -822,12 +983,44 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
     if decode_note and not allow_unlocked:
         raise ValueError(f'设置的 PWM 符号率为 {symbol_hz/1000:.6g} kHz，'+decode_note+
                          _clock_hint(transitions, next_states))
-    bit_width = code_chips if prefix_chips else int(math.log2(code_chips))
-    _candidate_decisions(frames, code_chips, prefix_chips, decision_mode)
+    bit_width = (max(1, math.ceil(math.log2(len(symbol_widths)))) if pulse_options is not None else
+                 code_chips if prefix_chips else int(math.log2(code_chips)))
+    if pulse_options is None:
+        _candidate_decisions(frames, code_chips, prefix_chips, decision_mode)
+    if symbol_widths is not None and pulse_options is None:
+        if decision_mode == 'width':
+            for row in frames:
+                if row['symbol'] in (-2, -3) or row['valid']:
+                    continue
+                high = decision_width_chips(row)
+                if math.isfinite(high) and high > 0:
+                    nearest = min(symbol_widths, key=lambda w: abs(w-high))
+                    k = nearest-prefix_chips
+                    row['candidate_symbol'], row['candidate_bits'] = k, '1'*k+'0'*(code_chips-k)
+                    row['candidate_source'] = '最邻近配置占空比；未确认，不计BER'
+        # Keep physical thermometer words unchanged; only symbol labels follow
+        # the user codebook. Unknown widths remain erasures, never clamped.
+        for key in ('symbol', 'candidate_symbol'):
+            active = frames[key] >= 0
+            physical = frames[key][active].copy()+prefix_chips
+            frames[key][active] = [symbol_widths.index(int(w)) if w in symbol_widths else -1 for w in physical]
+        rejected = frames['valid'] & (frames['symbol'] < 0)
+        frames['valid'][rejected] = False
+        frames['bits'][rejected] = '?'*bit_width
+        frames['reason'][rejected] = '高片数不在已配置符号映射表中'
+        frames['candidate_bits'][frames['candidate_symbol'] == -1] = '?'*bit_width
+    if output_binary and pulse_options is None:
+        if symbol_widths is None:
+            raise ValueError('二进制符号输出需要显式占空比映射表')
+        bit_width = max(1, math.ceil(math.log2(len(symbol_widths))))
+        for key, bit_key in (('symbol', 'bits'), ('candidate_symbol', 'candidate_bits')):
+            active = frames[key] >= 0
+            frames[bit_key][active] = [format(int(k), f'0{bit_width}b') for k in frames[key][active]]
+            frames[bit_key][frames[key] == -1] = '?'*bit_width
     if decode_note:
         # Diagnostic state recovery is useful even if the PWM protocol fails.
         # Preserve explicit candidate columns; they are never treated as BER data.
-        invalidated = ~frames['training'] if training_options is not None else np.ones(len(frames), dtype=bool)
+        invalidated = ~frames['training'] if training_options is not None or pulse_options is not None else np.ones(len(frames), dtype=bool)
         frames['valid'][invalidated] = False
         frames['symbol'][invalidated] = -1
         frames['bits'][invalidated] = '?'*bit_width
@@ -848,7 +1041,7 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
     power = np.add.reduceat(abs(z)**2, starts)/np.diff(np.r_[starts, len(z)])
     origin = spectrum.first_tuple/fs
     frames['start_s'] += origin
-    bitstream = ''.join(frames['bits'][~frames['training']] if training_options is not None else frames['bits'])
+    bitstream = ''.join(frames['bits'][~frames['training']] if training_options is not None or pulse_options is not None else frames['bits'])
     valid_count = int(np.count_nonzero(frames['valid']))
     measured_duration = (frames['start_s'][-1]-frames['start_s'][0])+1/measured
     training_calibration = None
@@ -858,8 +1051,18 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
         training_calibration = dict(training_symbols=int(mask.sum()),
             updates=int(frames['calibration_id'].max(initial=0)),
             corrections_chips=frames['width_correction_chips'][starts_of_training].tolist(),
-            starts_s=frames['start_s'][starts_of_training].tolist(), target_duty_percent=20.)
-    return PWMRecovery(carrier, rate, cutoff, decimation, spectrum.first_tuple, count, clipped,
+            starts_s=frames['start_s'][starts_of_training].tolist(),
+            target_duty_percent=None if 'preamble_widths' in training_options else 20.,
+            preamble_widths=training_options.get('preamble_widths'),
+            payload_symbols=training_options.get('payload_symbols', 0),
+            auto_scale=bool(training_options.get('auto_scale', False)),
+            clock_width=bool(training_options.get('clock_width', False)),
+            measurement_uncertainty_chips=(prefix_chips+code_chips+guard_chips)*measured/rate,
+            scale_range=[float(np.nanmin(frames['width_scale'][frames['calibration_id'] > 0])),
+                         float(np.nanmax(frames['width_scale'][frames['calibration_id'] > 0]))]
+                        if np.any(frames['calibration_id'] > 0) else [],
+            spacing_symbols=int(np.count_nonzero(frames['calibration_source'] == '前导＋档位标定')))
+    result = PWMRecovery(carrier, rate, cutoff, decimation, spectrum.first_tuple, count, clipped,
         centers, float(np.angle(centers[1]*np.conj(centers[0]), deg=True)),
         float(20*np.log10(max(abs(centers[1]), 1e-20)/max(abs(centers[0]), 1e-20))),
         separation, z[selected], scatter_labels[selected], z[:view], times[:view]+origin,
@@ -872,11 +1075,44 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
         sampling_note=sampling_note, calibration_start_s=origin+calibration_start/fs,
         decode_locked=not bool(decode_note), decode_note=decode_note, state_fit_note=state_fit_note,
         search_note=search_note, version=_version, prefix_chips=prefix_chips,
-        training_calibration=training_calibration, decision_mode=decision_mode)
+        training_calibration=training_calibration, decision_mode=decision_mode, symbol_widths=symbol_widths,
+        output_binary=output_binary)
+    if pulse_options is not None:
+        from rx706_pwm_frames import check_frame_reference
+        result.pulse_options, result.pulse_calibrations = pulse_options, pulse_calibrations
+        result.frame_options = pulse_options['frame_options']
+        result.frame_check = check_frame_reference(frames, result.frame_options, symbol_widths,
+                                                  result.symbol_bitwords, cancel_event)
+        result.reference_check = result.frame_check
+        result.decoded_bit_rate = valid_count*pulse_options['information_bits']/measured_duration
+        result.training_calibration = dict(training_symbols=int(frames['training'].sum()),
+            updates=len(pulse_calibrations), corrections_chips=[], starts_s=[], target_duty_percent=None,
+            preamble_widths=None, payload_symbols=0, auto_scale=False, clock_width=True,
+            scale_range=[1., 1.], spacing_symbols=0)
+        for calibration in pulse_calibrations:
+            calibration['start_s'] += origin
+        for key in ('rise_s', 'fall_s'):
+            frames[key] += origin
+        result.sampling_note += (f" 依据前导实测拖尾及高电平稳定假设估计周期下限{pulse_options['estimated_min_period_us']:.3f}µs，"
+                                f"当前{1e6/symbol_hz:.3f}µs；器件稳定条件仍需实测。")
+        if not result.decode_locked:
+            result.frame_check.locked = False
+            result.frame_check.reason = result.decode_note
+    if training_options is not None and 'frame_options' in training_options:
+        from rx706_pwm_frames import validate_frame_options, check_frame_reference
+        result.frame_options = validate_frame_options(training_options['frame_options'], symbol_widths)
+        result.frame_check = check_frame_reference(frames, training_options['frame_options'],
+                                                  symbol_widths, result.symbol_bitwords, cancel_event)
+        result.reference_check = result.frame_check
+        if not result.decode_locked:
+            result.frame_check.locked = False
+            result.frame_check.reason = result.decode_note
+    return result
 
 
 def recover_pwm2(spectrum, *, total_chips=20, prefix_chips=8, guard_chips=2, **options):
     """Configurable fixed-high + thermometer-coded + fixed-low PWM protocol."""
-    pwm2_layout(total_chips, prefix_chips, guard_chips)
+    if options.get('pulse_options') is None:
+        pwm2_layout(total_chips, prefix_chips, guard_chips)
     return recover_pwm(spectrum, _version=2, _total_chips=total_chips,
                        _prefix_chips=prefix_chips, guard_chips=guard_chips, **options)

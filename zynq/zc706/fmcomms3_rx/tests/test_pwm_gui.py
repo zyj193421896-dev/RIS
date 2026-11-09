@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from test_signal_analysis_view import headless_window
 import test_rx706_pwm as fixtures
-from rx706_spectrum_gui import PWM_MODE
+from rx706_spectrum_gui import PWM_MODE, PWM2_MODE
 
 
 class PWMViewTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class PWMViewTests(unittest.TestCase):
                 view.filename.set('capture.bin')
                 view.analyze = Mock(side_effect=lambda: setattr(view, 'busy', True))
                 view.show_pwm_symbols()
-                self.assertEqual(view.constellation_mode.get(), PWM_MODE)
+                self.assertEqual(view.constellation_mode.get(), PWM2_MODE)
                 self.assertTrue(view._open_pwm_after_analysis)
                 view.analyze.assert_called_once()
 

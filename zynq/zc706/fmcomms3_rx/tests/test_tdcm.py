@@ -104,7 +104,7 @@ class TDCMTests(unittest.TestCase):
 
     def test_worker_and_gui_mode_switch(self):
         from test_signal_analysis_view import headless_window
-        from rx706_spectrum_gui import TDCM_MODE,QAM_PWM_MODE
+        from rx706_spectrum_gui import TDCM_MODE,PWM2_MODE
         with tempfile.TemporaryDirectory() as directory:
             spectrum,_,options,_ = self.capture(directory)
             options['tdcm_options']['payload_symbols'] -= 1
@@ -120,9 +120,10 @@ class TDCMTests(unittest.TestCase):
             self.assertIn('TDCM +1 harmonic',[line.get_label() for line in view.axes.lines])
             view.busy = False
             view.analyze = Mock()
-            view.constellation_mode.set(QAM_PWM_MODE)
+            view.constellation_mode.set(PWM2_MODE)
             view.on_mode_changed()
-            view.analyze.assert_called_once()
+            view.analyze.assert_not_called()
+            self.assertIn('核对当前参数', view.status.get())
 
 
 if __name__=='__main__':unittest.main()

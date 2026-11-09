@@ -29,11 +29,16 @@ def headless_window():
     view.rate=Value(); view.status=Value(); view.summary=Value()
     view.filename=Value(); view.auto=Value(True)
     view.constellation_mode=Value('原始 IQ'); view.pending_download=None
+    for name, value in dict(pwm2_training_enabled=False, pwm_reference_enabled=False, pwm_frame_enabled=False,
+                           pwm2_clock_width=True, pwm2_decision_mode='连续脉宽',
+                           pwm2_mapping='高片数减前高', pwm2_input_mode='时间片协议').items():
+        setattr(view, name, Value(value))
     view.cycle_khz=Value('100'); view.recovery_ms=Value('1000'); view.center_hint=Value('自动')
     view.plot_view=Value('总览'); view._active_plot_name='总览'; view._overview_limits=None
     view.figure=Figure(figsize=(12,8),layout='constrained')
     view._create_plot_axes()
     view.canvas=FigureCanvasAgg(view.figure)
+    view.refresh_parameter_visibility = Mock()
     return view
 
 

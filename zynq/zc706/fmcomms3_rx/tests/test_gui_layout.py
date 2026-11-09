@@ -14,6 +14,183 @@ from rx706_gui import Rx706App, capture_length
 
 
 class LayoutTests(unittest.TestCase):
+    def test_pwm_binary_symbol_table_and_complete_csv_remain_aligned(self):
+        import csv
+        from test_pwm2 import PWM2Tests
+        from rx706_spectrum_gui import PWM2_MODE
+        fixture = PWM2Tests()
+        fixture.setUp()
+        view = SpectrumWindow(self.root)
+        try:
+            fixture.capture(total=25, prefix=6, guard=7)
+            view.window.withdraw()
+            self.assertEqual(view.constellation_mode.get(), PWM2_MODE)
+            self.assertEqual(view.pwm_symbol_khz.get(), '169.971671')
+            self.assertEqual(view.pwm2_preset.get(), '自定义')
+            self.assertFalse(view.show_advanced.get())
+            view.constellation_mode.set(PWM2_MODE)
+            view._analyze_worker(fixture.path, dict(nfft=4096, averages=1, sample_rate_hz=fixture.fs),
+                dict(kind='pwm2', total_chips=25, prefix_chips=6, guard_chips=7,
+                     symbol_hz=fixture.rate, symbol_widths=tuple(range(6, 19)), output_binary=True))
+            view.poll()
+            self.assertIsNotNone(view.recovery)
+            dialog = view.show_pwm_symbols()
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+            tree = next(w for w in descendants(dialog) if isinstance(w, ttk.Treeview))
+            self.assertEqual(tuple(tree['displaycolumns']), ('index', 'start_s', 'duty_percent',
+                'decision_duty_percent', 'decoded_duty_percent', 'symbol', 'duty_thermometer', 'bits', 'reason'))
+            self.assertEqual(len(tree.item(tree.get_children()[0], 'values')), len(tree['columns']))
+            export_button = next(w for w in descendants(dialog) if isinstance(w, ttk.Button)
+                                 and w.cget('text') == '导出全部 CSV…')
+            target = fixture.path.with_suffix('.csv')
+            with patch('rx706_spectrum_gui.filedialog.asksaveasfilename', return_value=str(target)), \
+                 patch('rx706_spectrum_gui.messagebox.showinfo'):
+                export_button.invoke()
+            with target.open(encoding='utf-8-sig', newline='') as stream:
+                rows = list(csv.reader(stream))
+            self.assertEqual(len(rows), len(view.recovery.frames)+1)
+            self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
+        finally:
+            view.close()
+            fixture.tearDown()
+
+    def test_pwm_simple_four_fields_and_configurable_advanced_protocol(self):
+        from rx706_spectrum_gui import PWM2_MODE, PWM150_PRESET
+        view = SpectrumWindow(self.root)
+        try:
+            view.window.withdraw()
+            view.constellation_mode.set(PWM2_MODE)
+            view.refresh_parameter_visibility()
+            visible = [view._parameter_titles[box] for box, _ in view._parameter_groups if box.winfo_manager()]
+            self.assertEqual(visible, ['信号解调模式', 'PWM 脉宽与信息解调', '最简帧：公共训练与用户数据'])
+            self.assertTrue(view.pwm_frame_enabled.get())
+            pulse = view.pwm2_protocol_options()['pulse_options']
+            config = pulse['frame_options']
+            self.assertEqual(config['user_count'], 1)
+            self.assertEqual(config['training_symbols'], 0)
+            self.assertEqual(pulse['symbol_count'], 105)
+            view.pwm2_input_mode.set('占空比范围')
+            view.pwm_duty_start.set('20')
+            view.pwm_duty_step.set('7')
+            view.pwm_duty_count.set('8')
+            view.pwm_frame_enabled.set(False)
+            pwm_box = next(box for box, _ in view._parameter_groups
+                           if view._parameter_titles[box] == 'PWM 脉宽与信息解调')
+            entries = [w for w in pwm_box.winfo_children()
+                       if isinstance(w, ttk.Entry) and w.winfo_manager()]
+            self.assertEqual(len(entries), 3)
+            self.assertTrue(view.pwm2_training_enabled.get())
+            self.assertTrue(view.pwm2_clock_width.get())
+            view.pwm_duty_start.set('20')
+            view.pwm_duty_step.set('7')
+            view.pwm_duty_count.set('8')
+            self.assertIn('结束占空比 69%', view.pwm_duty_summary.get())
+            options = view.pwm2_protocol_options()
+            self.assertEqual(options['symbol_widths'], (20, 27, 34, 41, 48, 55, 62, 69))
+            self.assertTrue(options['output_binary'])
+            self.assertEqual(options['training_options']['preamble_widths'], (20, 20, 20))
+            self.assertEqual(options['training_options']['payload_symbols'], 8)
+            self.assertTrue(options['training_options']['auto_scale'])
+            self.assertIn('每帧净荷 8', view.pwm_duty_summary.get())
+            self.assertTrue(options['training_options']['clock_width'])
+            view.pwm2_preset.set(PWM150_PRESET)
+            view.apply_pwm2_preset()
+            options = view.pwm2_protocol_options()
+            self.assertEqual(options['symbol_widths'], tuple(range(6, 19)))
+            self.assertEqual(options['training_options']['preamble_widths'], (6, 6, 6))
+            self.assertEqual(options['training_options']['payload_symbols'], 13)
+            view.show_advanced.set(True)
+            view.pwm2_input_mode.set('时间片协议')
+            view.pwm2_mapping.set('自定义高片数表')
+            view.pwm2_width_table.set('18 17 16 15 14 13 12 11 10 9 8 7 6')
+            view.pwm2_preamble_start.set('20')
+            view.pwm2_preamble_step.set('7')
+            view.pwm2_preamble_count.set('3')
+            options = view.pwm2_protocol_options()
+            self.assertEqual(options['training_options']['preamble_widths'], (5, 6.75, 8.5))
+            self.assertEqual(options['symbol_widths'][0], 18)
+            view.filename.set('local.bin')
+            with patch('rx706_spectrum_gui.threading.Thread') as thread:
+                view.analyze()
+                delivered = thread.call_args.kwargs['args'][2]
+                self.assertEqual(delivered['training_options']['preamble_widths'], (5, 6.75, 8.5))
+                self.assertEqual(delivered['symbol_widths'], tuple(range(18, 5, -1)))
+                self.assertTrue(delivered['training_options']['clock_width'])
+                self.assertTrue(delivered['training_options']['auto_scale'])
+                self.assertEqual(delivered['training_options']['payload_symbols'], 13)
+            view.busy = False
+            view.pwm2_training_enabled.set(False)
+            self.assertNotIn('training_options', view.pwm2_protocol_options())
+            for preset in ('20片：8+10+2', '50片：20+25+5', '50片：8+40+2', PWM150_PRESET):
+                view.pwm2_training_enabled.set(False)
+                view.pwm2_clock_width.set(False)
+                view.pwm2_preset.set(preset)
+                view.apply_pwm2_preset()
+                self.assertTrue(view.pwm2_training_enabled.get())
+                self.assertTrue(view.pwm2_clock_width.get())
+                self.assertIn('training_options', view.pwm2_protocol_options())
+        finally:
+            view.close()
+
+    def test_170k_preset_delivers_calibration_and_thermometer_settings(self):
+        from rx706_spectrum_gui import PWM170_PRESET
+        view = SpectrumWindow(self.root)
+        try:
+            view.window.withdraw()
+            view.pwm2_preset.set(PWM170_PRESET)
+            view.apply_pwm2_preset()
+            self.assertEqual(view.pwm_symbol_khz.get(), '169.971671')
+            view.filename.set('local.bin')
+            with patch('rx706_spectrum_gui.threading.Thread') as thread:
+                view.analyze()
+                delivered = thread.call_args.kwargs['args'][2]
+            self.assertEqual(delivered['symbol_widths'], (20,27,34,41,48,55,62,69))
+            training = delivered['training_options']
+            self.assertEqual(training['preamble_widths'], (20,20,20))
+            self.assertEqual(training['payload_symbols'], 8)
+            self.assertTrue(training['auto_scale'])
+            self.assertTrue(training['clock_width'])
+            self.assertNotIn('reference_options', delivered)
+            view.busy = False
+            view.pwm2_preamble_start.set('30')
+            view.pwm_duty_start.set('30')
+            with patch('rx706_spectrum_gui.threading.Thread') as thread:
+                view.analyze()
+                changed = thread.call_args.kwargs['args'][2]
+            self.assertEqual(changed['symbol_widths'], (30,37,44,51,58,65,72,79))
+            self.assertEqual(changed['training_options']['preamble_widths'], (30,30,30))
+            self.assertEqual(changed['training_options']['payload_symbols'], 8)
+            self.assertTrue(changed['training_options']['auto_scale'])
+        finally:
+            view.close()
+
+    def test_payload_edits_preserve_independent_preamble_and_explicit_frame_length(self):
+        from rx706_spectrum_gui import PWM150_PRESET, PWM170_PRESET
+        view = SpectrumWindow(self.root)
+        try:
+            view.window.withdraw()
+            view.pwm2_preset.set(PWM150_PRESET)
+            view.apply_pwm2_preset()
+            view.pwm_duty_start.set('20')
+            view.pwm_duty_step.set('7')
+            view.pwm_duty_count.set('8')
+            # A valid independent 24% preamble must not be silently overwritten.
+            self.assertEqual(view.pwm2_preamble_start.get(), '24')
+            self.assertIn('前导：24%', view.pwm_duty_summary.get())
+            view.pwm2_preset.set(PWM170_PRESET)
+            view.apply_pwm2_preset()
+            self.assertEqual(view.pwm2_protocol_options()['training_options']['preamble_widths'], (20,20,20))
+            view.pwm2_payload_count.set('17')
+            view.pwm_duty_count.set('7')
+            self.assertEqual(view.pwm2_protocol_options()['training_options']['payload_symbols'], 17)
+            view.pwm2_auto_scale.set(False)
+            self.assertIn('同宽前导只校准偏移', view.pwm_duty_summary.get())
+        finally:
+            view.close()
+
     def setUp(self):
         try:
             self.root=tk.Tk()
@@ -94,13 +271,13 @@ class LayoutTests(unittest.TestCase):
             app.controller.thread.join(timeout=2)
             app.destroy()
 
-    def test_qam_configurable_preamble_is_delivered_to_worker(self):
-        from rx706_spectrum_gui import QAM_MODE
+    def test_retained_tdcm_configurable_preamble_is_delivered_to_worker(self):
+        from rx706_spectrum_gui import TDCM_MODE
         view=SpectrumWindow(self.root)
         try:
             view.window.withdraw()
             view.filename.set('local.bin')
-            view.constellation_mode.set(QAM_MODE)
+            view.constellation_mode.set(TDCM_MODE)
             self.assertFalse(view.qam_preamble_enabled.get())
             view.qam_preamble_enabled.set(True)
             view.qam_preamble_symbols.set('0x00 0b00010001 255')
@@ -118,32 +295,16 @@ class LayoutTests(unittest.TestCase):
                 thread.return_value.start.assert_called_once()
         finally:view.close()
 
-    def test_mixed_pwm_qam_mode_defaults_and_worker_options(self):
-        from rx706_spectrum_gui import QAM_PWM_MODE
+    def test_retired_modes_are_removed_and_raw_pwm_tdcm_remain(self):
+        from rx706_spectrum_gui import QAM_PWM_MODE, QAM_MODE, RECOVERY_MODE, PWM_MODE, PWM2_MODE, TDCM_MODE
         view=SpectrumWindow(self.root)
         try:
             view.window.withdraw()
-            view.filename.set('mixed.bin')
-            view.constellation_mode.set(QAM_PWM_MODE)
-            self.assertIn(QAM_PWM_MODE, RECOVERY_MODES)
-            self.assertEqual([view.pwm2_total_chips.get(),view.pwm2_prefix_chips.get(),view.pwm2_guard_chips.get()],
-                             ['25','5','8'])
-            self.assertEqual(view.qam_pwm_symbols.get(),'0 0 0')
-            view.qam_pwm_gap_us.set('12.5')
-            view.qam_pwm_width_offset.set('-0.25')
-            view.qam_pwm_qam_window.set('4')
-            with patch('rx706_spectrum_gui.threading.Thread') as thread:
-                view.analyze()
-                options=thread.call_args.kwargs['args'][2]
-                self.assertEqual(options['kind'],'qam')
-                self.assertNotIn('preamble_options',options)
-                pwm=options['pwm_preamble_options']
-                self.assertEqual((pwm['total_chips'],pwm['prefix_chips'],pwm['guard_chips']),(25,5,8))
-                self.assertEqual(pwm['symbols'],'0 0 0')
-                self.assertAlmostEqual(pwm['gap_s'],.0000125)
-                self.assertEqual(pwm['width_offset_chips'],-.25)
-                self.assertEqual(pwm['qam_search_symbols'],4)
-                thread.return_value.start.assert_called_once()
+            self.assertEqual(RECOVERY_MODES, (PWM_MODE, PWM2_MODE, TDCM_MODE))
+            for mode in (QAM_PWM_MODE, QAM_MODE, RECOVERY_MODE):
+                self.assertNotIn(mode, RECOVERY_MODES)
+            view.refresh_parameter_visibility()
+            self.assertEqual(view.constellation_mode.get(), PWM2_MODE)
         finally:view.close()
 
     def test_tdcm_parameters_are_independent_of_ordinary_pwm_and_qam(self):
@@ -153,7 +314,7 @@ class LayoutTests(unittest.TestCase):
             view.window.withdraw()
             view.filename.set('tdcm.bin')
             view.constellation_mode.set(TDCM_MODE)
-            self.assertEqual(view.pwm_symbol_khz.get(),'100')
+            self.assertEqual(view.pwm_symbol_khz.get(),'169.971671')
             self.assertEqual(view.qam_symbol_khz.get(),'100')
             self.assertEqual(view.tdcm_symbol_khz.get(),'19.53125')
             self.assertEqual(view.tdcm_pwm_khz.get(),'19.53125')

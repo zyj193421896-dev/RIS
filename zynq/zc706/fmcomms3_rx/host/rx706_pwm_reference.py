@@ -72,8 +72,8 @@ class ReferenceCheck:
                 f'擦除 {self.erasures}/{self.evaluation_symbols}（{self.erasures/max(1,self.evaluation_symbols):.3%}，单列且不计入 BER 分母）。'
                 f'\n全片段可判决毛刺告警 {self.warned_symbols} 个，其中参考不匹配 {self.warned_mismatches} 个。'
                 '接收符号和 ? 保持原判决；参考序列不参与纠错。'
-                + (f' 另排除20%训练符号{self.training_symbols}个，不计擦除和BER。' if self.training_symbols else '')
-                + (f' PWM version2误码按中间{len(self.bitwords[0])}片码型计算，不代表同等数量的独立净荷比特。' if self.bitwords is not None else ''))
+                + (f' 另排除训练符号{self.training_symbols}个，不计擦除和BER。' if self.training_symbols else '')
+                + (f' 按每符号{len(self.bitwords[0])}位配置码字计算误码。' if self.bitwords is not None else ''))
 
 
 def check_reference(frames, sequence, bits_per_symbol=3, sync_symbols=64, symbol_bitwords=None):

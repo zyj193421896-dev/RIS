@@ -1,4 +1,8 @@
-"""Causal width-offset calibration from three equal 20%-duty pilot symbols."""
+"""Configured causal preamble calibration, with legacy 20% pilot support.
+
+The GUI always supplies explicit preamble widths; the legacy API remains for
+existing offline callers. Reference payload cycles never enter calibration.
+"""
 import math
 import numpy as np
 from rx706_spectrum import _cancel
@@ -7,10 +11,20 @@ from rx706_spectrum import _cancel
 TRAINING_FIELDS = [('raw_reason', 'U64'), ('structure_ok', '?'), ('training', '?'),
                    ('calibration_id', 'i4'), ('width_correction_chips', 'f8'),
                    ('corrected_high_chips', 'f8'), ('corrected_one_us', 'f8'),
-                   ('corrected_zero_us', 'f8')]
+                   ('corrected_zero_us', 'f8'), ('width_scale', 'f8'),
+                   ('calibration_source', 'U32'), ('clock_high_chips', 'f8')]
 
 
 def validate_training(total, prefix, code, options):
+    if 'frame_options' in options:
+        from rx706_pwm_frames import validate_frame_options
+        config = validate_frame_options(options['frame_options'], options['alphabet_widths'])
+        sequence = config['training_sequence']
+        return tuple(options['alphabet_widths'][k] for k in sequence) or tuple(options['alphabet_widths']), .5
+    if 'preamble_widths' in options:
+        from rx706_pwm_protocol import validate_protocol_training
+        preamble, tolerance, _, _ = validate_protocol_training(total, prefix, code, options)
+        return tuple(preamble), tolerance
     target = total*.2
     if abs(target-round(target)) > 1e-8 or not prefix <= round(target) <= prefix+code:
         raise ValueError('20%训练宽度必须为整数片，且位于当前version2可用高片数范围内')
@@ -20,12 +34,22 @@ def validate_training(total, prefix, code, options):
     return int(round(target)), tolerance
 
 
-def apply_training(frames, total, prefix, code, guard, width_tolerance, options, cancel_event=None):
+def apply_training(frames, total, prefix, code, guard, width_tolerance, options, cancel_event=None,
+                   *, measurement_uncertainty_chips=0.):
     """Use only past/current pilot samples; payload values never fit an offset.
 
     Every stable triple is a pilot by protocol. Repeated equal payload triples
     are consequently ambiguous and must be avoided by the transmitter.
     """
+    if 'frame_options' in options:
+        from rx706_pwm_frames import apply_frame_training
+        return apply_frame_training(frames, total, options['frame_options'],
+                                    options['alphabet_widths'], cancel_event)
+    if 'preamble_widths' in options:
+        from rx706_pwm_protocol import apply_protocol_training
+        return apply_protocol_training(frames, total, prefix, code, guard,
+                                       width_tolerance, options, cancel_event,
+                                       measurement_uncertainty_chips=measurement_uncertainty_chips)
     target, same_tolerance = validate_training(total, prefix, code, options)
     idle = frames['symbol'] == -2
     frames['raw_reason'] = frames['reason']
@@ -46,6 +70,7 @@ def apply_training(frames, total, prefix, code, guard, width_tolerance, options,
         period_us = float(row['one_us']+row['zero_us'])
         high = float(raw[at]+value)
         row['calibration_id'] = calibration_id
+        row['width_scale'], row['calibration_source'] = 1., '20%前导偏移'
         row['width_correction_chips'] = value
         row['corrected_high_chips'] = high
         row['corrected_one_us'] = high/total*period_us
