@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "method": "tdcm_parameter_config",
+  "name": "256QAM 120k 64slice 3+4+16 无CRC",
+  "description": "通用接收参数，不绑定IQ或标定；加载时保留当前采样率、原载波、文件、通道及起点。16个物理明文符号不假定重复，不解析CRC。",
+  "order": 256,
+  "symbol_hz": 120000,
+  "tdcm_options": {
+    "acquisition_mode": "pwm",
+    "base_hz": 120000,
+    "harmonic": 1,
+    "normalization": "blind",
+    "amplitude_scale": 1,
+    "phase_deg": 0,
+    "payload_symbols": 0,
+    "payload_repeat": 1,
+    "payload_data_symbols": 16,
+    "payload_tail_symbols": 0,
+    "crc_debug": {
+      "enabled": false
+    },
+    "compensation": {
+      "enabled": true,
+      "clock_mode": "off",
+      "phase_mode": "off",
+      "frame_mode": "all",
+      "frame_symbols": 20,
+      "max_frames": 2048,
+      "calibration_frames": 20,
+      "period_ppm": 0,
+      "clock_search_ppm": 1000,
+      "fit_timing": false,
+      "timing_offset_symbols": 0
+    }
+  },
+  "pwm_preamble_options": {
+    "symbols": "0 0 0",
+    "total_chips": 64,
+    "prefix_chips": 16,
+    "guard_chips": 48,
+    "symbol_hz": 120000,
+    "gap_s": 0,
+    "search_s": 1,
+    "max_error_percent": 25,
+    "width_offset_chips": 0,
+    "max_frequency_hz": 1000,
+    "qam_search_symbols": 0
+  },
+  "preamble_options": {
+    "symbols": "00 08 88 80",
+    "representation": "hex",
+    "max_frequency_hz": 1000,
+    "max_evm_percent": 10,
+    "search_s": 1,
+    "orientation": "auto",
+    "fit_dc_offset": true
+  }
+}

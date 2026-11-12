@@ -65,7 +65,10 @@ class LayoutTests(unittest.TestCase):
             view.constellation_mode.set(PWM2_MODE)
             view.refresh_parameter_visibility()
             visible = [view._parameter_titles[box] for box, _ in view._parameter_groups if box.winfo_manager()]
-            self.assertEqual(visible, ['信号解调模式', 'PWM 脉宽与信息解调', '最简帧：公共训练与用户数据'])
+            self.assertEqual(visible, [])
+            self.assertTrue(view.workflows.panel.winfo_manager())
+            view.show_advanced.set(True)
+            view.refresh_parameter_visibility()
             self.assertTrue(view.pwm_frame_enabled.get())
             pulse = view.pwm2_protocol_options()['pulse_options']
             config = pulse['frame_options']
@@ -81,7 +84,7 @@ class LayoutTests(unittest.TestCase):
                            if view._parameter_titles[box] == 'PWM 脉宽与信息解调')
             entries = [w for w in pwm_box.winfo_children()
                        if isinstance(w, ttk.Entry) and w.winfo_manager()]
-            self.assertEqual(len(entries), 3)
+            self.assertEqual(len(entries), 8)  # expert fields now explicitly enabled
             self.assertTrue(view.pwm2_training_enabled.get())
             self.assertTrue(view.pwm2_clock_width.get())
             view.pwm_duty_start.set('20')
@@ -200,6 +203,12 @@ class LayoutTests(unittest.TestCase):
         self.errors=[]
         self.root.report_callback_exception=lambda *args:self.errors.append(args)
 
+    def pump_events(self):
+        # macOS Tk can continuously enqueue native redraws inside update().
+        # Use the application's actual event loop with a bounded timer instead.
+        self.root.after(100, self.root.quit)
+        self.root.mainloop()
+
     def tearDown(self):
         try:self.root.destroy()
         except tk.TclError:pass
@@ -217,22 +226,22 @@ class LayoutTests(unittest.TestCase):
                 tree.pack(fill='both',expand=True)
                 reset=configure_symbol_table(tree,cols,headers,50,40)
                 item=tree.insert('','end',values=(32,'318.6603','1'*20+'0'*30,6,'按码型判决'))
-                self.root.update()
+                self.pump_events()
                 widths={key:int(tree.column(key,'width')) for key in cols}
                 window.geometry('460x300+20+20')
-                self.root.update()
+                self.pump_events()
                 self.assertEqual(widths,{key:int(tree.column(key,'width')) for key in cols})
                 self.assertLess(tree.xview()[1],1.)
                 for key in cols:
                     self.assertFalse(tree.column(key,'stretch'))
                     tree.column(key,width=4)
                 tree.event_generate('<ButtonRelease-1>',x=20,y=10)
-                self.root.update()
+                self.pump_events()
                 for key in cols:
                     self.assertGreaterEqual(tree.column(key,'width'),tree.column(key,'minwidth'))
                 reset()
                 tree.xview_moveto(.25)
-                self.root.update()
+                self.pump_events()
                 # Header hit-testing and row cells retain a common x origin.
                 for n,key in enumerate(cols,1):
                     bounds=tree.bbox(item,key)
@@ -246,7 +255,7 @@ class LayoutTests(unittest.TestCase):
         view=SpectrumWindow(self.root)
         try:
             view.window.withdraw()
-            self.root.update()
+            self.pump_events()
             self.assertEqual(len(view.figure.axes),3)
             self.assertFalse(hasattr(view,'power_axes'))
             self.assertFalse(hasattr(view,'phase_axes'))

@@ -1,0 +1,602 @@
+{
+  "type": "SYNTHETIC ONLY: generated int16 IQ through production search and decoder",
+  "hardware_or_new_real_capture_tested": false,
+  "source_codebook_sha256": "7ed5818a505b4fb052dca969cdd461c0bbfd3338c13ffa2e4440544c261b02e7",
+  "synthetic_profile": {
+    "schema_version": 3,
+    "mode": "脉冲宽度与时延",
+    "user_count": 1,
+    "users": [
+      {
+        "name": "U1",
+        "identity": [
+          75,
+          8,
+          60,
+          2,
+          46,
+          10,
+          23,
+          6,
+          68,
+          38
+        ],
+        "payload_symbols": 78,
+        "reference": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77
+        ]
+      }
+    ],
+    "symbol_khz": 169.971671,
+    "duty_step": 5.0,
+    "duty_count": 78,
+    "min_high_chips": 5,
+    "low_guard_chips": 4,
+    "joint_delay": true,
+    "codebook": [
+      [
+        0.0,
+        5.0
+      ],
+      [
+        0.0,
+        6.0
+      ],
+      [
+        0.0,
+        7.0
+      ],
+      [
+        0.0,
+        8.0
+      ],
+      [
+        0.0,
+        9.0
+      ],
+      [
+        0.0,
+        10.0
+      ],
+      [
+        0.0,
+        11.0
+      ],
+      [
+        0.0,
+        12.0
+      ],
+      [
+        0.0,
+        13.0
+      ],
+      [
+        0.0,
+        14.0
+      ],
+      [
+        0.0,
+        15.0
+      ],
+      [
+        0.0,
+        16.0
+      ],
+      [
+        1.0,
+        5.0
+      ],
+      [
+        1.0,
+        6.0
+      ],
+      [
+        1.0,
+        7.0
+      ],
+      [
+        1.0,
+        8.0
+      ],
+      [
+        1.0,
+        9.0
+      ],
+      [
+        1.0,
+        10.0
+      ],
+      [
+        1.0,
+        11.0
+      ],
+      [
+        1.0,
+        12.0
+      ],
+      [
+        1.0,
+        13.0
+      ],
+      [
+        1.0,
+        14.0
+      ],
+      [
+        1.0,
+        15.0
+      ],
+      [
+        2.0,
+        5.0
+      ],
+      [
+        2.0,
+        6.0
+      ],
+      [
+        2.0,
+        7.0
+      ],
+      [
+        2.0,
+        8.0
+      ],
+      [
+        2.0,
+        9.0
+      ],
+      [
+        2.0,
+        10.0
+      ],
+      [
+        2.0,
+        11.0
+      ],
+      [
+        2.0,
+        12.0
+      ],
+      [
+        2.0,
+        13.0
+      ],
+      [
+        2.0,
+        14.0
+      ],
+      [
+        3.0,
+        5.0
+      ],
+      [
+        3.0,
+        6.0
+      ],
+      [
+        3.0,
+        7.0
+      ],
+      [
+        3.0,
+        8.0
+      ],
+      [
+        3.0,
+        9.0
+      ],
+      [
+        3.0,
+        10.0
+      ],
+      [
+        3.0,
+        11.0
+      ],
+      [
+        3.0,
+        12.0
+      ],
+      [
+        3.0,
+        13.0
+      ],
+      [
+        4.0,
+        5.0
+      ],
+      [
+        4.0,
+        6.0
+      ],
+      [
+        4.0,
+        7.0
+      ],
+      [
+        4.0,
+        8.0
+      ],
+      [
+        4.0,
+        9.0
+      ],
+      [
+        4.0,
+        10.0
+      ],
+      [
+        4.0,
+        11.0
+      ],
+      [
+        4.0,
+        12.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ],
+      [
+        5.0,
+        7.0
+      ],
+      [
+        5.0,
+        8.0
+      ],
+      [
+        5.0,
+        9.0
+      ],
+      [
+        5.0,
+        10.0
+      ],
+      [
+        5.0,
+        11.0
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        6.0,
+        6.0
+      ],
+      [
+        6.0,
+        7.0
+      ],
+      [
+        6.0,
+        8.0
+      ],
+      [
+        6.0,
+        9.0
+      ],
+      [
+        6.0,
+        10.0
+      ],
+      [
+        7.0,
+        5.0
+      ],
+      [
+        7.0,
+        6.0
+      ],
+      [
+        7.0,
+        7.0
+      ],
+      [
+        7.0,
+        8.0
+      ],
+      [
+        7.0,
+        9.0
+      ],
+      [
+        8.0,
+        5.0
+      ],
+      [
+        8.0,
+        6.0
+      ],
+      [
+        8.0,
+        7.0
+      ],
+      [
+        8.0,
+        8.0
+      ],
+      [
+        9.0,
+        5.0
+      ],
+      [
+        9.0,
+        6.0
+      ],
+      [
+        9.0,
+        7.0
+      ],
+      [
+        10.0,
+        5.0
+      ],
+      [
+        10.0,
+        6.0
+      ],
+      [
+        11.0,
+        5.0
+      ]
+    ],
+    "cycle_calibration": {},
+    "reference_enabled": true,
+    "reference_format": "symbols",
+    "reference_repeat": true,
+    "reference_reset": true,
+    "search_symbols": 4096,
+    "identity_errors": 1,
+    "clock_width": true
+  },
+  "actual_symbol_hz": 169974.220575065,
+  "full_file_seconds": 2.0,
+  "evaluation": {
+    "analyzed_duration_s": 2.0,
+    "analyzed_sample_rate_hz": 15360000.0,
+    "analyzed_first_tuple": 0,
+    "analyzed_input_samples": 30720000,
+    "decided_payload_symbol_rate_hz": 150657.0,
+    "complete_payload_symbol_rate_hz": 150657.0,
+    "decided_payload_information_ceiling_bps": 946939.8420871298,
+    "decided_payload_equivalent_ceiling_bps": 946939.8420871298,
+    "physical_rate_measured": true,
+    "physical_rate_source": "多个身份前导的长间隔拟合",
+    "physical_symbol_rate_hz": 169974.22058018312,
+    "codebook_size": 78,
+    "physical_equivalent_ceiling_bps": 1068356.3431840641,
+    "physical_chip_rate_hz": 3399484.411603662,
+    "actual_transport_bps": null,
+    "physical_rate_definition": "Received identity-marker clock fit Rs × log2(M). Includes preamble/training occupancy; no payload, erasure or BER scaling. A codebook-equivalent theoretical upper bound, not verified encoded bit throughput or independent entropy of fixed training. Binary mapping/FEC unspecified.",
+    "actual_goodput_bps": null,
+    "rate_definition": "Decided complete payload symbols / actual analyzed input duration. Excludes identity, calibration, erasures and partial blocks from numerator only. Decided does not imply error-free. log2(M) is a capacity upper bound, not transport goodput; mapping/CRC/FEC unspecified.",
+    "measured_symbol_rate_hz": 169974.22058018312,
+    "gross_codebook_information_bps": 1068356.3431840641,
+    "payload_information_ceiling_bps": 946952.2132767842,
+    "frame_cycle_symbols": 88,
+    "scored_payload_per_cycle": 78,
+    "label_bits_per_symbol": 7,
+    "information_bits_per_symbol": 6.285402218862249,
+    "complete_payload_symbols": 301314,
+    "decided_payload_symbols": 301314,
+    "erased_payload_symbols": 0,
+    "physical_erasure_fraction": 0.0,
+    "complete_blocks": 3863,
+    "identity_failed_blocks": 0,
+    "reference_overall": {
+      "complete_blocks": 3863,
+      "partial_blocks": 1,
+      "identity_failures": 0,
+      "evaluated_blocks": 3863,
+      "bad_blocks": 0,
+      "bit_errors": 0,
+      "compared_bits": 2109198,
+      "erased_bits": 0,
+      "unreferenced_blocks": 0,
+      "estimated_symbols": 0,
+      "ber": 0.0,
+      "bler": 0.0
+    },
+    "ber": 0.0,
+    "bler": 0.0,
+    "reference_status": "按用户JSON参考对固定判决事后比对；参考未独立认证，未参与参数/相位/标签选择。无参考覆盖时BER未测。",
+    "exclusions": "Only complete payload, excluding identity and explicit calibration slots; BER denominator is compared reference label bits, excluding erasures. Label bits are not independent information bits."
+  },
+  "selection": {
+    "symbol_hz": 169971.67099999997,
+    "state_one": "A",
+    "offset_ppm": 0,
+    "tolerance_chips": 0.4
+  },
+  "analysis_interval": {
+    "first_tuple": 0,
+    "duration_s": 2.0,
+    "full_file": true,
+    "completed": true
+  },
+  "selection_interval": {
+    "first_tuple": 0,
+    "duration_s": 1.0
+  },
+  "runtime": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:11:29) [Clang 20.1.8 ]",
+    "numpy": "2.3.5",
+    "scipy": "1.16.3",
+    "platform": "macOS-27.2-arm64-arm-64bit-Mach-O",
+    "commit": "318dff5a2569d675d2b6f1b946e0b43e70423b79",
+    "decoder_sha256": {
+      "rx706.py": "853db9c6717f198c390d58d8a75d74ba0e2dff49afb41aa576bd4a54b69d6b7e",
+      "rx706_gui.py": "722b0f813aa87aec5e66b89837e216f8b87982705dfe9aaeb503a1873c928a26",
+      "rx706_iq_replay.py": "9f6516e3e70b9d1bddc517eb336fdc9e8aa0b8860e2b55af614a6a15aa1c6957",
+      "rx706_plot_navigation.py": "b40ccfd2f1e7534ac5a0620098a576ea0f01d21990c2f79027ccc19e5934a47b",
+      "rx706_pwm.py": "94058f7370353863c7e6dcedadd26dbc4b8126d17e8c06b747324e82eb3a8643",
+      "rx706_pwm_autotune.py": "5fea569a4d3810952ff7bb3932b0a690959196c0f0f5db167e344e523ea2c659",
+      "rx706_pwm_frame_builder.py": "56b2faceb2cf84639b05d1be5725fe0a99c3c7e4c5487f1347e4a5038a1cb4d2",
+      "rx706_pwm_frames.py": "c37a958edd062ec204422300de75ed57a86375bf19f8391fc2478063e3bb1c8e",
+      "rx706_pwm_protocol.py": "690cad361d2800c2188cfa655cbb2ada12eecb63dbad0b8e367705af7988222d",
+      "rx706_pwm_pulse.py": "437b389e00e3c7830571ad00871406024fd56270e1ffd6e8bb13664620a8df51",
+      "rx706_pwm_reference.py": "b748e7e0d745c76016279839ae890295724f648f35819f89770feac4f230d529",
+      "rx706_pwm_symbols.py": "0b36f087340a159ec202d5eb715ff967e38a545d8d88c43695729a805a6ee22c",
+      "rx706_pwm_training.py": "08cf26bb018bcc53014238f12a68ab45a37f62c2630a899a00f2e5be1309a991",
+      "rx706_qam.py": "7088e625cf8217eada9b50a3c7a8dc7646554f91b2bf6977227374ff26c07059",
+      "rx706_qam_config.py": "f249104512e38522349329ff73f373171436e3c9b4ce0b18a38661ec35a8de23",
+      "rx706_qam_debug_gui.py": "dfd32e2ad85a02f27eb4294de5ddaa26c1b75669a1cf9210ea1f83206c6e8e45",
+      "rx706_qam_payload.py": "928f2eb9b1f2b92ddd050382a37fa767b8a2ba4a081bd04cdda184c7f319c61c",
+      "rx706_qam_preamble.py": "8212b943ce34e28b08026660c414dae40957852eaedf0f0434b325e20d191ec0",
+      "rx706_qam_profiles.py": "412d85d4f4e3d32713a7867903dde3bab3a127a9fdf9a3dfda8ff25b9319c97d",
+      "rx706_qam_pwm.py": "39d38777b562b48a45f2aaa33b226a633f4a02a4f93b9d6d1b780da8e69d50b0",
+      "rx706_qam_replay_adapter.py": "42e9998fc87c6114ef663e8f7c947cc7e08a1f86d32da705ef1b2a4f583dcd04",
+      "rx706_qam_training.py": "b3ea5581c4e2b8043bfa410f02deb124410a48a9e55f9c8eaea2980cbf5ee6b4",
+      "rx706_receiver_capture.py": "987acb76d1d177836800c3ca8832b90f9e8a45122037166ac09ebe30c5b51524",
+      "rx706_receiver_gui.py": "5b862fb31c3195a766199b0c2c2eb67bf3b2edeaed88b4b150ebbd429719bd9a",
+      "rx706_recovery.py": "d530d0d093ab806fcbff7cc8476b9060b2ab5c4141b65fbcd3dcc83c9b18a3ab",
+      "rx706_spectrum.py": "983d496512e14620d6c59290ce0708077a9f1cd875e85f0ccc3338948acd4766",
+      "rx706_spectrum_gui.py": "7dba2d00221e62cb5b2e0e3f974e92a4ff88023c2ee634680b36a8430a6cf026",
+      "rx706_table_layout.py": "242732e07c7b9071d48cbc3fca24a18883dbbf8d54df68f39783ee8043fe171f",
+      "rx706_tdcm.py": "38d93ab9b463e62cac7c352630292579ae78e5cc984e830cca7c20a6a6cf8a38",
+      "rx706_tdcm_auto.py": "e02df0e3aec9a106568f6361e7e89e73104c1e478343ced1e15048648915c542",
+      "rx706_tdcm_debug.py": "baaf9a1b28647094c32429ba4cd7c7d3d6fa4bbba240c06423ec1473c9dde291",
+      "rx706_tdcm_frozen.py": "d65da1692eec8ee28eef19ba858bc3425243f8f2f8eab9fa196f20ffebdb9169",
+      "rx706_tdcm_headerless.py": "f6b3b822d11a8041fcc8a6dd4e038ff889ee1aa0c038f0454745afc1afb54151",
+      "rx706_ui_contrast.py": "0782ab2372b663ad522242f5caf02f58671df6b60176a3398eff667745711345",
+      "rx706_workflows.py": "2ace8cf12961de638e33b39183a0a1cdf16a946c06702bdbc375354782df352e"
+    }
+  },
+  "inverted_short_evaluation": {
+    "analyzed_duration_s": 0.008,
+    "analyzed_sample_rate_hz": 15360000.0,
+    "analyzed_first_tuple": 0,
+    "analyzed_input_samples": 122880,
+    "decided_payload_symbol_rate_hz": 146250.0,
+    "complete_payload_symbol_rate_hz": 146250.0,
+    "decided_payload_information_ceiling_bps": 919240.0745086039,
+    "decided_payload_equivalent_ceiling_bps": 919240.0745086039,
+    "physical_rate_measured": true,
+    "physical_rate_source": "多个身份前导的长间隔拟合",
+    "physical_symbol_rate_hz": 169974.36504836418,
+    "codebook_size": 78,
+    "physical_equivalent_ceiling_bps": 1068357.2512246901,
+    "physical_chip_rate_hz": 3399487.3009672835,
+    "actual_transport_bps": null,
+    "physical_rate_definition": "Received identity-marker clock fit Rs × log2(M). Includes preamble/training occupancy; no payload, erasure or BER scaling. A codebook-equivalent theoretical upper bound, not verified encoded bit throughput or independent entropy of fixed training. Binary mapping/FEC unspecified.",
+    "actual_goodput_bps": null,
+    "rate_definition": "Decided complete payload symbols / actual analyzed input duration. Excludes identity, calibration, erasures and partial blocks from numerator only. Decided does not imply error-free. log2(M) is a capacity upper bound, not transport goodput; mapping/CRC/FEC unspecified.",
+    "measured_symbol_rate_hz": 169974.36504836418,
+    "gross_codebook_information_bps": 1068357.2512246901,
+    "payload_information_ceiling_bps": 946953.0181309753,
+    "frame_cycle_symbols": 88,
+    "scored_payload_per_cycle": 78,
+    "label_bits_per_symbol": 7,
+    "information_bits_per_symbol": 6.285402218862249,
+    "complete_payload_symbols": 1170,
+    "decided_payload_symbols": 1170,
+    "erased_payload_symbols": 0,
+    "physical_erasure_fraction": 0.0,
+    "complete_blocks": 15,
+    "identity_failed_blocks": 0,
+    "reference_overall": {
+      "complete_blocks": 15,
+      "partial_blocks": 1,
+      "identity_failures": 0,
+      "evaluated_blocks": 15,
+      "bad_blocks": 0,
+      "bit_errors": 0,
+      "compared_bits": 8190,
+      "erased_bits": 0,
+      "unreferenced_blocks": 0,
+      "estimated_symbols": 0,
+      "ber": 0.0,
+      "bler": 0.0
+    },
+    "ber": 0.0,
+    "bler": 0.0,
+    "reference_status": "按用户JSON参考对固定判决事后比对；参考未独立认证，未参与参数/相位/标签选择。无参考覆盖时BER未测。",
+    "exclusions": "Only complete payload, excluding identity and explicit calibration slots; BER denominator is compared reference label bits, excluding erasures. Label bits are not independent information bits."
+  },
+  "no_reference_ber": null,
+  "elapsed_s": 24.29190483300772
+}

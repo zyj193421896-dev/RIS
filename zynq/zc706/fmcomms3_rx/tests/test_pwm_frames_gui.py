@@ -157,7 +157,7 @@ class FrameGUITests(unittest.TestCase):
             self.assertIsNotNone(view.recovery, view.status.get())
             self.assertEqual(view.recovery.frame_check.overall['evaluated_blocks'], 9)
             self.assertEqual(view.recovery.frame_check.overall['bad_blocks'], 0)
-            self.assertIn('log₂(M)', view.summary.get())
+            self.assertIn('log₂(36)', view.summary.get())
             dialog = view.show_pwm_symbols()
             widgets = list(descendants(dialog))
             tree = next(w for w in widgets if isinstance(w, ttk.Treeview))

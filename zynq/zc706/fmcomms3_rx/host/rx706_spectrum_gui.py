@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from pathlib import Path
 
 from rx706_spectrum import AnalysisCancelled, analyze_bin, display_trace
+from rx706_ui_contrast import bright_hint
 
 RECOVERY_MODE = "周期方波载波恢复"
 PWM_MODE = "PWM v1（旧协议）"
@@ -45,6 +46,9 @@ class SpectrumWindow:
         self._open_pwm_after_analysis = False
         self._pwm_dialog = None
         self._pwm_dialog_result = None
+        self._autotune_report = None
+        self._autotune_token = 0
+        self._fixed_source_sha256 = None
         self.poll_after = None
         self.filename = tk.StringVar(value=str(filename))
         self.channel = tk.StringVar(value="RX1")
@@ -58,6 +62,8 @@ class SpectrumWindow:
         self.recovery_ms = tk.StringVar(value="1000")
         self.center_hint = tk.StringVar(value="自动")
         self.qam_order = tk.StringVar(value="256")
+        # Used only by the portable configuration front door, never expert/replay.
+        self.qam_auto_acquisition = tk.BooleanVar(value=True)
         self.qam_symbol_khz = tk.StringVar(value="100")
         self.qam_rolloff = tk.StringVar(value="0.35")
         self.qam_pulse = tk.StringVar(value="RRC")
@@ -112,7 +118,10 @@ class SpectrumWindow:
         self.pwm_low_guard_chips = tk.StringVar(value='1')
         self.pwm_pulse_codebook = tk.StringVar(value='')
         self.pwm_width_quantization = tk.StringVar(value='左右区间（最近码字）')
+        self.pwm_air_crc12 = False
         self.pwm_cycle_calibration = {}
+        self.pwm_nearest_decision = True
+        self.pwm_pulse_tolerance = tk.StringVar(value='0.4')
         self.pwm_duty_summary = tk.StringVar()
         self.pwm_auto_search = tk.BooleanVar(value=True)
         self.pwm_code_chips = tk.StringVar(value="8")
@@ -145,6 +154,17 @@ class SpectrumWindow:
         self.status = tk.StringVar(value="选择已下载的 bin，点击分析；无需连接板卡")
         self.summary = tk.StringVar(value="频率轴为 I+jQ 的有符号基带频率；0 Hz 为接收 LO。")
         self._build_ui(Figure, FigureCanvasTkAgg, NavigationToolbar2Tk)
+        from rx706_workflows import ReceiverWorkflows
+        self.workflows = ReceiverWorkflows(self, self.outer, self.outer.winfo_children()[0])
+        self.refresh_parameter_visibility()
+        self.filename.trace_add('write', self._source_changed)
+        # All interpretation settings retire prior results, not just PWM fields.
+        for name in self.workflows.settings_names():
+            if name != 'filename':
+                getattr(self, name).trace_add('write', self._receiver_changed)
+
+    def run_workflow(self):
+        return self.workflows.run()
 
     def _build_ui(self, Figure, FigureCanvasTkAgg, NavigationToolbar2Tk):
         from rx706_plot_navigation import PlotNavigation
@@ -160,6 +180,7 @@ class SpectrumWindow:
         self.window.minsize(1000, 650)
         outer = ttk.Frame(self.window, padding=8)
         outer.pack(fill="both", expand=True)
+        self.outer = outer
         path_row = ttk.Frame(outer)
         path_row.pack(fill="x", pady=(0, 6))
         ttk.Label(path_row, text="IQ 文件").pack(side="left", padx=(0, 6))
@@ -169,8 +190,10 @@ class SpectrumWindow:
         browse.pack(side="left", padx=(0, 8))
         self.fixed_pwm_button = ttk.Button(path_row, text="加载固定 PWM 数据", command=self.load_fixed_pwm_data)
         self.fixed_pwm_button.pack(side="left", padx=(0, 8))
-        self.controls.extend((entry, browse, self.fixed_pwm_button))
-        self.analyze_button = ttk.Button(path_row, text="分析信号", command=self.analyze)
+        self.frame_builder_button = ttk.Button(path_row, text='帧配置向导…', command=self.generate_frame_config)
+        self.frame_builder_button.pack(side='left', padx=(0, 8))
+        self.controls.extend((entry, browse, self.fixed_pwm_button, self.frame_builder_button))
+        self.analyze_button = ttk.Button(path_row, text="运行接收", command=self.run_workflow)
         self.analyze_button.pack(side="left", padx=(0, 8))
         self.stop_button = ttk.Button(path_row, text="停止", command=self.cancel.set, state="disabled")
         self.stop_button.pack(side="left")
@@ -188,7 +211,8 @@ class SpectrumWindow:
         self.pwm_symbols_button = ttk.Button(bar, text="PWM 符号表 / 比特流…", command=self.show_pwm_symbols)
         self.pwm_symbols_button.pack(side="left", padx=(0, 10))
         ttk.Label(bar, text="滚轮缩放 · 拖动平移 · 双击放大/返回").pack(side="left")
-        ttk.Label(outer, textvariable=self.brief_status, foreground="#24486c", anchor="w").pack(fill="x", pady=(0, 4))
+        self.brief_label = bright_hint(ttk.Label(outer, textvariable=self.brief_status, anchor="w"))
+        self.brief_label.pack(fill="x", pady=(0, 4))
         self.panes = ttk.Panedwindow(outer, orient="horizontal")
         self.panes.pack(fill="both", expand=True)
         self.sidebar = ttk.Frame(self.panes, width=self.sidebar_width)
@@ -209,6 +233,7 @@ class SpectrumWindow:
         self.parameter_canvas.pack(side="left", fill="both", expand=True)
         self.parameter_canvas.configure(yscrollcommand=scrollbar.set)
         body = ttk.Frame(self.parameter_canvas, padding=(4, 4, 8, 10))
+        self.parameter_body = body
         body_id = self.parameter_canvas.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>", lambda event: self.parameter_canvas.configure(scrollregion=self.parameter_canvas.bbox("all")))
         self.parameter_canvas.bind("<Configure>", lambda event: self.parameter_canvas.itemconfigure(body_id, width=event.width))
@@ -343,7 +368,8 @@ class SpectrumWindow:
         self._simple_pwm_fields = simple_fields
         self._pulse_fields = []
         for label, variable in (('最小高电平宽度 (片)', self.pwm_min_high_chips),
-                                ('末尾低电平预留 (片)', self.pwm_low_guard_chips)):
+                                ('末尾低电平预留 (片)', self.pwm_low_guard_chips),
+                                ('脉宽判决容差 (片，<0.5)', self.pwm_pulse_tolerance)):
             entry = field(box, label, variable)
             self._pulse_fields.extend(box.grid_slaves(row=entry.grid_info()['row']))
         joint = ttk.Checkbutton(box, text='按时延＋脉宽联合码表解码', variable=self.pwm_joint_delay,
@@ -454,6 +480,12 @@ class SpectrumWindow:
             widget = ttk.Button(box, text=label, command=action)
             widget.grid(row=row, column=col, sticky='ew', pady=4)
             self.controls.append(widget)
+        self.autotune_button = ttk.Button(box, text='自动接收调试 → 全文件码率 / BER', command=self.start_pwm_autotune)
+        self.autotune_button.grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='ew', pady=4)
+        self.controls.append(self.autotune_button)
+        self.freeze_pwm_button = ttk.Button(box, text='保存本文件固定接收方案…', command=self.save_pwm_autotune)
+        self.freeze_pwm_button.grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='ew', pady=4)
+        self.controls.append(self.freeze_pwm_button)
         ttk.Label(box, text='仅循环发送“用户身份前导＋净荷”，没有缓冲和公共训练。前导用于身份识别、符号定时及下降沿拖尾校正。前导长度由序列项数决定，数据长度逐用户配置；默认单用户。',
                   wraplength=290).grid(row=box.grid_size()[1], column=0, columnspan=2, sticky='w')
         box = group("已知循环校验 / BER")
@@ -529,7 +561,8 @@ class SpectrumWindow:
             elif r.kind in ('pwm', 'pwm2'):
                 good = int(r.frames['valid'].sum())
                 warned = int((r.frames['valid'] & (r.frames['glitch_count'] > 0)).sum())
-                brief = (f"{r.protocol_label} [{('码型' if r.decision_mode == 'pattern' else '脉宽')}] | 符号率 {r.measured_symbol_rate_hz/1000:.4f} kHz | "
+                from rx706_pwm_autotune import symbol_rate_description
+                brief = (f"{r.protocol_label} [{('码型' if r.decision_mode == 'pattern' else '脉宽')}] | {symbol_rate_description(r)} | "
                          f"有效 {good}/{len(r.frames)}（毛刺告警{warned}） | {r.mapping_note} | 原Fs / {r.decimation}")
                 if r.frame_check is not None:
                     stats = r.frame_check.overall
@@ -544,6 +577,8 @@ class SpectrumWindow:
         else:
             brief = self.status.get().splitlines()[0] if self.status.get() else ""
         self.brief_status.set(brief[:180])
+        if hasattr(self, 'workflows'):
+            self.workflows.results()
 
     def maximize(self, event=None):
         try:
@@ -684,7 +719,7 @@ class SpectrumWindow:
         grid = np.unique(r.ideal)
         self.iq_axes.plot(grid.real, grid.imag, 'rx', ms=4)
         prefix = f"TDCM {r.tdcm['harmonic']:+d} | " if getattr(r,'tdcm',None) is not None else ''
-        self.iq_axes.set(title=prefix+f'{r.order}QAM | decision EVM {r.evm_percent:.2f}%', xlabel='Normalized I', ylabel='Normalized Q')
+        self.iq_axes.set(title=prefix+f'{r.order}QAM payload (compensated) | nearest-grid EVM {r.evm_percent:.2f}%', xlabel='Normalized I', ylabel='Normalized Q')
         self.iq_axes.set_aspect('equal', adjustable='box')
         t = (r.time_s-r.time_s[0])*1e6
         self.wave_axes.plot(t[:1000], z.real[:1000], '.-', lw=.5, label='I')
@@ -741,6 +776,9 @@ class SpectrumWindow:
         if hasattr(self, 'parameter_footer'):
             self.parameter_footer.pack_forget()
             self.parameter_footer.pack(fill='x')
+
+        if hasattr(self, 'workflows'):
+            self.workflows.visibility()
 
     def update_duty_summary(self):
         from rx706_pwm_protocol import duty_protocol
@@ -893,11 +931,15 @@ class SpectrumWindow:
             joint_delay=self.pwm_joint_delay.get(),
             codebook=self.pwm_pulse_codebook.get(), frame_options=self.frame_config(),
             width_quantization='floor_width' if self.pwm_width_quantization.get() == '脉宽向下取整' else 'nearest',
-            cycle_calibration=self.pwm_cycle_calibration)
+            cycle_calibration=self.pwm_cycle_calibration, air_crc12=self.pwm_air_crc12,
+            nearest_decision=self.pwm_nearest_decision,
+            tolerance_chips=float(self.pwm_pulse_tolerance.get()))
         return validate_pulse_options(config, float(self.pwm_symbol_khz.get())*1000)
 
     def configure_pulse_codebook(self):
         dialog = tk.Toplevel(self.window)
+        self._workflow_editor = dialog
+        dialog.grab_set()
         dialog.title('符号值 → 延迟片数、高电平片数')
         dialog.geometry('650x520')
         dialog.transient(self.window)
@@ -942,6 +984,8 @@ class SpectrumWindow:
             self.pwm_frame_users.extend(default_users(count, alphabet)[len(self.pwm_frame_users):])
         users = [dict(user) for user in self.pwm_frame_users]
         dialog = tk.Toplevel(self.window)
+        self._workflow_editor = dialog
+        dialog.grab_set()
         dialog.title('用户身份与净荷 / 已知数据')
         dialog.geometry('780x600')
         dialog.transient(self.window)
@@ -1005,6 +1049,7 @@ class SpectrumWindow:
                 messagebox.showerror('配置错误', str(exc), parent=dialog)
                 return
             self.pwm_frame_users = users
+            self._receiver_changed()
             self.update_duty_summary()
             dialog.destroy()
 
@@ -1014,6 +1059,27 @@ class SpectrumWindow:
         ttk.Button(buttons, text='载入已知数据文件…', command=load_reference).pack(side='left')
         ttk.Button(buttons, text='保存所有用户', command=save).pack(side='right')
         show_user(0)
+
+    def generate_frame_config(self):
+        if self.busy:
+            return
+        from rx706_pwm_frame_builder import FrameBuilderDialog
+        import copy
+        try:
+            if int(self.pwm_frame_user_count.get()) != 1 or len(self.pwm_frame_users) > 1:
+                raise ValueError('快速向导只支持单用户，未修改任何配置。多用户请使用原用户编辑器。')
+            # frame_config may extend missing users; opening a draft must not do so.
+            original_users = self.pwm_frame_users
+            saved_users = copy.deepcopy(original_users)
+            try:
+                profile = self._pwm_profile_snapshot() if self.pwm2_input_mode.get() == '脉冲宽度与时延' else None
+            finally:
+                original_users[:] = saved_users
+                self.pwm_frame_users = original_users
+            self._frame_builder = FrameBuilderDialog(self.window, profile,
+                apply_callback=lambda config: self.load_frame_config(config=config))
+        except (ValueError, TypeError, KeyError) as exc:
+            messagebox.showerror('无法打开帧向导', str(exc), parent=self.window)
 
     def save_frame_config(self):
         try:
@@ -1036,7 +1102,12 @@ class SpectrumWindow:
                     min_high_chips=self.pwm_min_high_chips.get(), low_guard_chips=self.pwm_low_guard_chips.get(),
                     joint_delay=self.pwm_joint_delay.get(), codebook=self.pwm_pulse_codebook.get(),
                     width_quantization='floor_width' if self.pwm_width_quantization.get() == '脉宽向下取整' else 'nearest',
-                    cycle_calibration=self.pwm_cycle_calibration)
+                    cycle_calibration=self.pwm_cycle_calibration, air_crc12=self.pwm_air_crc12,
+                    nearest_decision=self.pwm_nearest_decision,
+                    state_one={'A=1': 'A', 'B=1': 'B'}.get(self.pwm_polarity.get(), 'auto'),
+                    tolerance_chips=float(self.pwm_pulse_tolerance.get()))
+                if self._fixed_source_sha256:
+                    config['source_sha256'] = self._fixed_source_sha256
             filename = filedialog.asksaveasfilename(parent=self.window, title='保存发收端共用的帧配置', defaultextension='.json', filetypes=[('帧配置', '*.json')])
             if filename:
                 from pathlib import Path
@@ -1044,14 +1115,250 @@ class SpectrumWindow:
         except (OSError, ValueError) as exc:
             messagebox.showerror('保存失败', str(exc), parent=self.window)
 
-    def load_frame_config(self, filename=None):
-        filename = filename or filedialog.askopenfilename(parent=self.window, title='载入帧配置',
-            initialdir=str(PWM_DATA_DIR), filetypes=[('帧配置', '*.json')])
+    def _receiver_changed(self, *args):
+        if getattr(self, '_workflow_restoring', False) or getattr(self, '_updating_result_rate', False):
+            return
+        self._autotune_token = getattr(self, '_autotune_token', 0)+1
+        self._autotune_report = None
+        if getattr(self, '_autotune_running', False):
+            self.cancel.set()
+        if (getattr(self, 'result', None) is not None or
+                getattr(self, 'recovery', None) is not None or
+                getattr(self, '_pwm_dialog', None) is not None):
+            self._invalidate_analysis()
+
+        if hasattr(self, 'workflows'):
+            self.workflows.refresh()
+
+    def _pwm_profile_snapshot(self):
+        """Explicit current sender frame; reference is only for post-selection scoring."""
+        import copy
+        self.pulse_config()
+        return dict(schema_version=3, mode='脉冲宽度与时延',
+            user_count=int(self.pwm_frame_user_count.get()), users=copy.deepcopy(self.pwm_frame_users),
+            search_symbols=self.pwm_frame_search.get(), identity_errors=self.pwm_frame_identity_errors.get(),
+            reference_enabled=self.pwm_frame_reference_enabled.get(),
+            reference_format=self.pwm_frame_reference_format.get(),
+            reference_repeat=self.pwm_frame_reference_repeat.get(), reference_reset=self.pwm_frame_reference_reset.get(),
+            symbol_khz=self.pwm_symbol_khz.get(), duty_step=self.pwm_duty_step.get(),
+            duty_count=self.pwm_duty_count.get(), min_high_chips=self.pwm_min_high_chips.get(),
+            low_guard_chips=self.pwm_low_guard_chips.get(), joint_delay=self.pwm_joint_delay.get(),
+            codebook=self.pwm_pulse_codebook.get(), nearest_decision=self.pwm_nearest_decision,
+            width_quantization='floor_width' if self.pwm_width_quantization.get() == '脉宽向下取整' else 'nearest',
+            cycle_calibration=copy.deepcopy(self.pwm_cycle_calibration), air_crc12=self.pwm_air_crc12,
+            tolerance_chips=float(self.pwm_pulse_tolerance.get()),
+            state_one={'A=1': 'A', 'B=1': 'B'}.get(self.pwm_polarity.get(), 'auto'))
+
+    def _autotune_note(self, text):
+        log = getattr(self, '_autotune_log', None)
+        if log is not None and log.winfo_exists():
+            log.insert('end', text+'\n')
+            log.see('end')
+
+    def start_pwm_autotune(self):
+        """Search only receiver parameters, then independently score the fixed decode."""
+        if self.closed or self.busy:
+            return
+        try:
+            if self.pwm2_input_mode.get() != '脉冲宽度与时延':
+                raise ValueError('自动接收调试需要脉冲宽度与时延模式及用户指定帧JSON')
+            name = self.filename.get().strip()
+            if not name:
+                raise ValueError('请先选择bin并载入本次发送帧JSON')
+            profile = self._pwm_profile_snapshot()
+            if not profile['codebook']:
+                raise ValueError('请载入明确码表/前导/净荷长度的本次帧JSON，不能推测未知发送帧')
+        except (ValueError, TypeError) as exc:
+            self.status.set('自动接收调试：'+str(exc))
+            return
+        self._receiver_changed()
+        self._invalidate_analysis()
+        token = self._autotune_token
+        channel = 1 if self.channel.get() == 'RX1' else 2
+        self.busy = self._autotune_running = True
+        self.cancel.clear()
+        self._buttons()
+        self.status.set('自动搜索接收参数；前导/码表固定，参考净荷不参与选择…')
+        old = getattr(self, '_autotune_window', None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        dialog = self._autotune_window = tk.Toplevel(self.window)
+        dialog.title('自动接收调试 · 候选 / 进度')
+        dialog.geometry('850x430')
+        self._autotune_log = scrolledtext.ScrolledText(dialog, wrap='word')
+        self._autotune_log.pack(fill='both', expand=True)
+        ttk.Button(dialog, text='取消搜索', command=self.cancel.set).pack()
+        self._autotune_note('固定前导、码表和帧组合；短窗扫描12候选，最多前1秒选参，再以固定参数分析完整文件（最长2秒）。关闭此窗口不取消，主窗口停止按钮亦可取消。')
+
+        def worker():
+            import tempfile
+            from pathlib import Path
+            from rx706_pwm_autotune import search
+            try:
+                with tempfile.TemporaryDirectory(prefix='rx706_pwm_search_') as folder:
+                    path = Path(folder)/'frame.json'
+                    path.write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8')
+                    report = search(name, path, channel=channel, cancel_event=self.cancel,
+                        progress=lambda item: self.events.put(('autotune_progress', (token, item))))
+                report['original_profile'] = profile
+                report['profile'] = 'GUI snapshot embedded as original_profile'
+                self.events.put(('autotune_done', (token, report, None)))
+            except AnalysisCancelled:
+                self.events.put(('autotune_done', (token, None, '搜索已取消；未应用任何候选。')))
+            except Exception as exc:
+                self.events.put(('autotune_done', (token, None, '搜索失败：'+str(exc))))
+        self.thread = threading.Thread(target=worker, daemon=True)
+        self.thread.start()
+
+    def _handle_autotune_event(self, kind, value):
+        if kind == 'autotune_progress':
+            token, item = value
+            if token == self._autotune_token:
+                c, m = item['candidate'], item.get('metrics')
+                detail = (f"有效覆盖 {m['usable_fraction']:.3%}；身份 {m['identity_blocks']}/{m['complete_blocks']}"
+                          if m else item.get('error', '未获取'))
+                stage = {'scan': '候选初筛', 'selection': '选参比较', 'full_record': '全文件固定验证'}.get(item.get('stage'), '候选')
+                line = f"{stage} [0, {item['duration_s']:g}]s  {c['state_one']}=1  {c['symbol_hz']:.6f}Hz  容差{c['tolerance_chips']:g}片：{detail}"
+                self._autotune_note(line)
+                self.status.set(line)
+            return
+        token, report, error = value
+        self.busy = self._autotune_running = False
+        self._buttons()
+        if token != self._autotune_token:
+            self.status.set('输入已改变；已丢弃过期搜索结果，请重新搜索。')
+            return
+        if error or self.cancel.is_set():
+            self.status.set(error or '搜索已取消；未应用候选。')
+            self._autotune_note(self.status.get())
+            return
+        if report['selected_profile'] is None:
+            self.status.set('没有可安全应用的候选：'+report['status'])
+            self._autotune_note(self.status.get())
+            return
+        import copy
+        selected = copy.deepcopy(report['original_profile'])
+        c = report['selection']['candidate']
+        selected.update(symbol_khz=str(c['symbol_hz']/1000), tolerance_chips=c['tolerance_chips'],
+                        state_one=c['state_one'], source_sha256=report['provenance']['source_sha256'])
+        selected['receiver_settings'] = dict(channel=report['channel'], first_tuple=0,
+            duration_ms=report['provenance']['duration_s']*1000, decimation=1, hysteresis=.1,
+            glitch_tolerance_chips=.15, auto_search=False, center_hint='自动')
+        if not self.load_frame_config(config=selected):
+            self.status.set('候选载入失败，未开始最终评分。')
+            return
+        report['fixed_profile_with_reference'] = selected
+        self._autotune_report = report
+        self._autotune_note(f"已应用固定接收参数。选参区间前{min(report['provenance']['duration_s'], 1):g}秒；最终分析完整{report['provenance']['duration_s']:g}秒。原JSON参考仅用于事后BER/BLER统计，不反馈候选排名。")
+        self._autotune_note(report['selection']['metrics'].get('timing_note', ''))
+        self.analyze()
+
+    def save_pwm_autotune(self):
+        if self.busy:
+            return
+        report = self._autotune_report
+        if not report:
+            messagebox.showinfo('尚无固定方案', '请先完成自动接收调试；参数变化后须重新搜索。', parent=self.window)
+            return
+        filename = filedialog.asksaveasfilename(parent=self.window, title='保存本文件固定接收方案',
+            defaultextension='.json', filetypes=[('固定帧配置', '*.json')])
         if not filename:
+            return
+        try:
+            from pathlib import Path
+            path = Path(filename)
+            path.write_text(json.dumps(report['fixed_profile_with_reference'], ensure_ascii=False, indent=2), encoding='utf-8')
+            path.with_suffix('.search.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+            self.status.set('固定方案和搜索记录已保存；重新载入该JSON恢复极性/速率/容差/参考及接收设置。')
+        except (ValueError, OSError) as exc:
+            messagebox.showerror('保存失败', str(exc), parent=self.window)
+
+    def _pwm_file_summary(self, result):
+        from rx706_pwm_autotune import file_evaluation
+        e = file_evaluation(result)
+        s = e['reference_overall']
+        ber = (f"{s['bit_errors']}/{s['compared_bits']} = {s['ber']:.6%}"
+               if s['ber'] is not None else '未测（未启用或无完整参考覆盖）')
+        bler = (f"{s['bad_blocks']}/{s['evaluated_blocks']} = {s['bler']:.3%}"
+                if s['bler'] is not None else '未测')
+        erase = f"{e['physical_erasure_fraction']:.3%}" if e['physical_erasure_fraction'] is not None else '未测'
+        duration = e['analyzed_duration_s']
+        useful = e['decided_payload_symbol_rate_hz']
+        rates = ('有效净荷速率未测：缺少有效采样时长。\n' if duration is None else
+                 f"有效净荷（已判决，非无误码保证）：{useful/1000:.3f} ksym/s = "
+                 f"{e['decided_payload_symbols']} / {duration:.9g} s。\n"
+                 f"时长分母：实际读取{e['analyzed_input_samples']}个采样 / {e['analyzed_sample_rate_hz']:.9g} Hz，"
+                 f"起点tuple={e['analyzed_first_tuple']}；包含失锁、间隙与不完整尾部的时间。\n"
+                 f"已判决净荷的等效信息容量上限：{e['decided_payload_information_ceiling_bps']/1000:.3f} kbit/s。\n")
+        gross = e['physical_equivalent_ceiling_bps']
+        if gross is None:
+            physical = f"物理码率等效上限未测：{e['physical_rate_source']}；不能用配置码率冒充实测。\n"
+        else:
+            physical = (f"物理码率等效上限（含前导/训练）：{gross/1e6:.6f} Mbit/s。\n"
+                        f"实测码元率 {e['physical_symbol_rate_hz']:.6f} Baud × log₂({e['codebook_size']})；"
+                        f"时钟来源：{e['physical_rate_source']}。\n"
+                        f"物理码片率：{e['physical_chip_rate_hz']/1e6:.6f} Mchip/s，不是独立比特率。\n")
+        if gross is not None:
+            physical += (f"去身份/保留校准后净荷理论上限（{e['scored_payload_per_cycle']}/{e['frame_cycle_symbols']}）："
+                         f"{e['payload_information_ceiling_bps']/1000:.3f} kbit/s。\n")
+        text = (physical + rates +
+                '物理等效上限不扣前导/训练、错误或擦除；固定训练并不承载同数量独立信息。\n'
+                '实际传输比特率及无误码净比特率：未知；未定义传输比特映射、CRC/FEC，不能由标签位或容量推得。\n'
+                f"{e['label_bits_per_symbol']}位输出是符号编号，不等于同数量独立信息比特。\n"
+                f"完整净荷：{e['complete_payload_symbols']}符号，已判决{e['decided_payload_symbols']}，"
+                f"擦除{e['erased_payload_symbols']}（{erase}），身份失败{e['identity_failed_blocks']}/{e['complete_blocks']}块。\n"
+                f"按JSON参考比对 BER（已比较标签位，不含擦除）：{ber}；BLER：{bler}。\n"
+                f"参考覆盖擦除{s['erased_bits']}标签位；参考未覆盖{s['unreferenced_blocks']}块。"
+                '此参考覆盖计数不能替代上面的完整净荷判决擦除。\n'
+                f"完整块最近码字估计{s['estimated_symbols']}符号，按实际判决参与校验。\n"
+                '身份和保留校准不计净荷，尾部不完整块排除。参考未经独立认证；搜索不利用净荷BER。\n'
+                +result.pulse_options.get('timing_note', ''))
+        if self._autotune_report is not None:
+            self._autotune_report['gui_post_selection_evaluation'] = e
+        return text
+
+    def _invalidate_analysis(self):
+        """A displayed/exportable result always belongs to the current inputs."""
+        self.result = self.recovery = None
+        report = getattr(self, '_qam_report', None)
+        if report is not None and not report.closed:
+            report.close()
+        self._qam_report = None
+        dialog = self._pwm_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.destroy()
+        self._pwm_dialog = self._pwm_dialog_result = None
+        self._empty_axes()
+        self.canvas.draw_idle()
+        self.summary.set('输入已改变；请重新分析。')
+
+    def _source_changed(self, *args):
+        if getattr(self, '_workflow_restoring', False):
+            return
+        self._receiver_changed()
+        self._fixed_source_sha256 = None
+        self._invalidate_analysis()
+        # A/B labels are fitted separately for each capture, not transmitter bits.
+        self.pwm_polarity.set('自动（PWM约束）')
+        self.status.set('已选择采样文件；请确认帧配置后分析。')
+
+    def load_frame_config(self, filename=None, config=None):
+        if self.busy:
+            return False
+        if config is None:
+            filename = filename or filedialog.askopenfilename(parent=self.window, title='载入帧配置',
+                initialdir=str(PWM_DATA_DIR), filetypes=[('帧配置', '*.json')])
+        if not filename and config is None:
             return
         from pathlib import Path
         try:
-            config = json.loads(Path(filename).read_text(encoding='utf-8-sig'))
+            config = json.loads(Path(filename).read_text(encoding='utf-8-sig')) if config is None else dict(config)
+            if not isinstance(config, dict):
+                raise ValueError('帧配置须为JSON对象')
+            if config.get('source_sha256') and self.filename.get():
+                from rx706_pwm_autotune import sha256
+                if sha256(self.filename.get()) != config['source_sha256']:
+                    raise ValueError('固定方案不属于当前bin；请先选择对应采样文件')
             mapping = dict(user_count='pwm_frame_user_count', startup_symbols='pwm_frame_startup_count',
                 startup_pattern='pwm_frame_startup_pattern', training_symbols='pwm_frame_training_count',
                 training_pattern='pwm_frame_training_pattern', search_symbols='pwm_frame_search',
@@ -1063,6 +1370,9 @@ class SpectrumWindow:
             from rx706_pwm_protocol import duty_protocol
             from rx706_pwm_frames import validate_frame_options
             if config.get('mode') == '脉冲宽度与时延':
+                for key, default in dict(codebook='', min_high_chips=6, low_guard_chips=1,
+                        joint_delay=True, tolerance_chips=.4).items():
+                    config.setdefault(key, default)
                 from rx706_pwm_pulse import validate_pulse_options
                 if config.get('schema_version', 2) < 3 and 'tail_us' in config and not config.get('codebook'):
                     # Preserve the old sender's automatic codebook while removing
@@ -1070,9 +1380,17 @@ class SpectrumWindow:
                     import math
                     config['low_guard_chips'] = int(config.get('low_guard_chips', 1))+math.ceil(
                         float(config['tail_us'])*1e-6*float(config['symbol_khz'])*1000*100/float(config['duty_step'])-1e-9)
-                frames = dict(config, reference_format='bits' if config['reference_format'] == '二进制比特' else 'symbols')
+                frames = dict(config, reference_format='bits' if config.get('reference_format') in ('二进制比特', 'bits') else 'symbols')
                 validate_pulse_options(dict(config, step_percent=config['duty_step'], symbol_count=config['duty_count'],
                                            frame_options=frames), float(config['symbol_khz'])*1000)
+                if not isinstance(config['codebook'], str):
+                    config['codebook'] = '\n'.join(f'{d:g} {w:g}' for d, w in config['codebook'])
+                config['reference_format'] = '二进制比特' if frames['reference_format'] == 'bits' else '符号值'
+                self._invalidate_analysis()
+                self._receiver_changed()
+                self.pwm_nearest_decision = config.get('nearest_decision', True)
+                self.pwm_pulse_tolerance.set(str(config['tolerance_chips']))
+                self.pwm_air_crc12 = bool(config.get('air_crc12', False))
                 self.pwm_cycle_calibration = config.get('cycle_calibration') or {}
                 self.pwm_width_quantization.set('脉宽向下取整' if config.get('width_quantization') == 'floor_width' else '左右区间（最近码字）')
                 mapping.update(min_high_chips='pwm_min_high_chips', low_guard_chips='pwm_low_guard_chips',
@@ -1087,9 +1405,29 @@ class SpectrumWindow:
                 self.constellation_mode.set(PWM2_MODE)
                 self.refresh_parameter_visibility()
                 self.update_duty_summary()
+                self.pwm_polarity.set({'A': 'A=1', 'B': 'B=1'}.get(config.get('state_one'), '自动（PWM约束）'))
+                self._fixed_source_sha256 = config.get('source_sha256')
+                fixed = config.get('receiver_settings', {})
+                if 'center_hint' in fixed:
+                    self.center_hint.set(fixed['center_hint'])
+                for key, attribute in (('first_tuple', 'first_tuple'), ('duration_ms', 'recovery_ms'),
+                                       ('decimation', 'pwm_decimation'), ('hysteresis', 'pwm_hysteresis'),
+                                       ('glitch_tolerance_chips', 'pwm_glitch_chips')):
+                    if key in fixed:
+                        getattr(self, attribute).set(str(fixed[key]))
+                if 'auto_search' in fixed:
+                    self.pwm_auto_search.set(bool(fixed['auto_search']))
+                if 'channel' in fixed:
+                    self.channel.set('RX1' if fixed['channel'] == 1 else 'RX2')
+                if hasattr(self, 'workflows'):
+                    self.workflows.accepted()
                 return True
             widths = duty_protocol(config['duty_start'], config['duty_step'], config['duty_count'])[0]['symbol_widths']
             validate_frame_options(dict(config, reference_format='bits' if config['reference_format'] == '二进制比特' else 'symbols'), widths)
+            self._invalidate_analysis()
+            self.pwm_cycle_calibration = {}
+            self.pwm_air_crc12 = False
+            self.pwm_pulse_tolerance.set('0.4')
             self.pwm_frame_users = config['users']
             for key, attribute in mapping.items():
                 getattr(self, attribute).set(config[key])
@@ -1287,7 +1625,7 @@ class SpectrumWindow:
             return
         self.filename.set(str(filename))
         if self.auto.get():
-            self.analyze()
+            self.run_workflow()
 
     def _buttons(self):
         for widget in self.controls:
@@ -1305,6 +1643,10 @@ class SpectrumWindow:
             name = self.filename.get().strip()
             if not name:
                 raise ValueError("请选择已下载的 bin 文件")
+            if self._fixed_source_sha256:
+                from rx706_pwm_autotune import sha256
+                if sha256(name) != self._fixed_source_sha256:
+                    raise ValueError('固定方案输入SHA256不匹配，请重新搜索或载入本文件的帧配置')
             options = dict(channel=1 if self.channel.get() == "RX1" else 2,
                 nfft=int(self.nfft.get()), averages=int(self.averages.get()),
                 first_tuple=int(self.first_tuple.get()), sample_rate_hz=float(self.rate.get()) * 1e6,
@@ -1379,13 +1721,12 @@ class SpectrumWindow:
         except ValueError as exc:
             self.status.set(f"参数错误：{exc}")
             return
-        self.result = None
-        self.recovery = None
-        self._empty_axes()
+        self._invalidate_analysis()
         self.axes.set_title("Analyzing local IQ file...")
         self.toolbar.update()
         self.canvas.draw()
         self.busy = True
+        self._analysis_token = self._autotune_token
         self.cancel.clear()
         self.status.set("正在分块读取和分析本地文件…")
         self.summary.set("")
@@ -1404,8 +1745,13 @@ class SpectrumWindow:
                     recovery_options = dict(recovery_options)
                     kind = recovery_options.pop('kind','periodic')
                     if kind == 'qam':
-                        from rx706_qam import recover_qam
-                        recovery = recover_qam(result, cancel_event=self.cancel, **recovery_options)
+                        automatic = recovery_options.pop('auto_acquisition', False)
+                        if automatic:
+                            from rx706_qam_acquisition import recover_auto_qam
+                            recovery = recover_auto_qam(result, cancel_event=self.cancel, **recovery_options)
+                        else:
+                            from rx706_qam import recover_qam
+                            recovery = recover_qam(result, cancel_event=self.cancel, **recovery_options)
                     elif kind in ('pwm', 'pwm2'):
                         from rx706_pwm import recover_pwm, recover_pwm2
                         reference_options = recovery_options.pop('reference_options', None)
@@ -1435,14 +1781,32 @@ class SpectrumWindow:
         except queue.Empty:
             pass
         else:
+            if kind in ('autotune_progress', 'autotune_done'):
+                self._handle_autotune_event(kind, value)
+                self.poll_after = self.window.after(50, self.poll)
+                return
+            if getattr(self, '_analysis_token', getattr(self, '_autotune_token', 0)) != getattr(self, '_autotune_token', 0):
+                self.busy = False
+                self._buttons()
+                self.status.set('输入已改变；已丢弃旧分析结果。')
+                self.poll_after = self.window.after(50, self.poll)
+                return
             self.busy = False
             self._buttons()
+            if kind == 'result' and self.cancel.is_set():
+                # Stop also retires work already queued but not yet displayed.
+                kind, value = 'cancelled', '分析已停止。'
+                self._invalidate_analysis()
             self._empty_axes()
             self.toolbar.update()
             if kind == "result":
                 result, (freq, power), self.recovery, recovery_error = value
                 self.result = result
-                self.rate.set(f"{result.sample_rate_hz / 1e6:g}")
+                self._updating_result_rate = True
+                try:
+                    self.rate.set(f"{result.sample_rate_hz / 1e6:g}")
+                finally:
+                    self._updating_result_rate = False
                 self.axes.plot(freq, power, color="#2467a4", linewidth=0.8)
                 self.axes.set_xlim(-result.sample_rate_hz / 2e6, result.sample_rate_hz / 2e6)
                 self.axes.set_ylim(max(-180, float(result.dbfs.max()) - 110), max(5, float(result.dbfs.max()) + 5))
@@ -1482,7 +1846,7 @@ class SpectrumWindow:
                 if self.recovery is not None:
                     r = self.recovery
                     if r.kind == 'qam':
-                        self.status.set(self.status.get()+f'\n{r.order}QAM：{len(r.scatter)}符号；判决EVM {r.evm_percent:.2f}%；未测BER')
+                        self.status.set(self.status.get()+f'\n{r.order}QAM：{len(r.scatter)}净荷符号；净荷最近邻EVM {r.evm_percent:.2f}%；未测BER')
                     elif r.kind in ('pwm', 'pwm2'):
                         good = int(r.frames['valid'].sum())
                         candidates = int((r.frames['candidate_symbol'] >= 0).sum())
@@ -1490,8 +1854,9 @@ class SpectrumWindow:
                         training_count = int(r.frames['training'].sum()) if r.training_calibration is not None else 0
                         warned = int((r.frames['valid'] & (r.frames['glitch_count'] > 0)).sum())
                         protocol_status = r.protocol_label if r.version == 2 else f'PWM：{r.code_chips}+{r.guard_chips}片'
+                        from rx706_pwm_autotune import symbol_rate_description
                         self.status.set(self.status.get()+f"\n{protocol_status}；"
-                            f"符号率 {r.measured_symbol_rate_hz/1000:.6f} kHz；有效 {good}（毛刺告警{warned}），空闲 {idle}，"
+                            f"{symbol_rate_description(r)}；有效 {good}（毛刺告警{warned}），空闲 {idle}，"
                             f"无效 {len(r.frames)-good-idle-training_count}；训练 {training_count}；候选符号 {candidates}；两态分离度 {r.separation:.1f}；{r.mapping_note}")
                         if not r.decode_locked:
                             self.status.set(self.status.get()+'\nPWM编码未锁定（两态已恢复）：'+r.decode_note)
@@ -1539,7 +1904,7 @@ class SpectrumWindow:
                             self.summary.set(pwm_note+'\n'+self.summary.get()+
                                 '\nPWM及切换间隔不输出为QAM数据；未自动分割后续帧。')
                         tdcm = getattr(r,'tdcm',None)
-                        if tdcm is not None:
+                        if tdcm is not None and pwm_sync is not None:
                             self.status.set(self.status.get()+f"\nTDCM {tdcm['harmonic']:+d}阶；每符号 {1e6/r.symbol_hz:g} µs；目标频点 {tdcm['target_hz']/1000:+.6f} kHz")
                             self.summary.set(f"TDCM {tdcm['harmonic']:+d}阶 → {r.order}QAM；基频 {tdcm['base_hz']/1000:g} kHz；"
                                 f"符号率 {r.symbol_hz/1000:g} kSym/s。\n原载波设置 {r.carrier_hz/1000:+.6f} kHz；"
@@ -1551,6 +1916,13 @@ class SpectrumWindow:
                                 "PWM两态校准须符合发端的幅度/时移约定，不能据此保证映射正确；后续重复前导不自动剔除。"
                                 "未持续跟踪载波/时钟漂移；判决EVM不能证明锁定，未测BER。\n"
                                 f"Gray映射：I后Q，各轴从负到正，MSB优先。候选比特：{preview}")
+                    if r.kind == 'qam':
+                        from rx706_workflows import auto_acquisition_note, auto_qam_summary, qam_training_note
+                        self.status.set(self.status.get()+'\n'+qam_training_note(r))
+                        auto_note = auto_acquisition_note(r)
+                        if auto_note:
+                            self.status.set(self.status.get()+'\n'+auto_note)
+                            self.summary.set(auto_qam_summary(r))
                     if r.kind in ('pwm', 'pwm2'):
                         nominal = r.symbol_rate_hz*r.bits_per_symbol
                         preview = ' | '.join(r.frames['bits' if r.decode_locked else 'candidate_bits'][:32])
@@ -1642,12 +2014,16 @@ class SpectrumWindow:
                                     f"按实测拖尾保守评估，完整落在符号内的码字最少{min(c['conservative_codewords'] for c in r.pulse_calibrations)}种；发送码表编号保持不变。\n"+
                                     r.frame_check.summary()+'\n'+r.sampling_note+'\n'+r.decode_note)
                 elif recovery_error:
+                    if self.constellation_mode.get() == PWM2_MODE and self.pwm2_input_mode.get() == '脉冲宽度与时延':
+                        recovery_error += ' 请同时核对指定JSON中的前导、码表与帧长度是否匹配本文件。'
                     prefix = 'QAM 解调' if self.constellation_mode.get() in QAM_MODES else ('PWM 解调' if self.constellation_mode.get() in PWM_MODES else '周期恢复')
                     self.status.set(self.status.get() + f"\n{prefix}未锁定：" + recovery_error)
                     self.summary.set(self.summary.get() + " 已显示原始 IQ，未强行生成星座簇。")
             else:
                 self.axes.set_title("Analysis stopped" if kind == "cancelled" else "Analysis failed")
                 self.status.set(("" if kind == "cancelled" else "分析失败：") + value)
+            if kind == 'result' and self.recovery is not None and getattr(self.recovery, 'pulse_options', None):
+                self.summary.set(self._pwm_file_summary(self.recovery))
             self.canvas.draw()
             if getattr(self, '_open_pwm_after_analysis', False):
                 self._open_pwm_after_analysis = False
@@ -1668,10 +2044,44 @@ class SpectrumWindow:
                 self.offer_download(filename)
         self.poll_after = self.window.after(50, self.poll)
 
-    def show_pwm_symbols(self):
-        """Open a bounded table; exports include all rows and preserve erasures."""
+    def show_qam_symbols(self):
+        """View the current QAM result without changing any receive settings."""
         if self.closed:
             return
+        if self.busy:
+            messagebox.showinfo('分析进行中', 'QAM分析尚未结束，请完成后再打开符号表。', parent=self.window)
+            return
+        r = self.recovery
+        if r is None or r.kind != 'qam' or self.result is None:
+            note = '尚无QAM解调结果。请先载入本次发送配置并点击“运行接收”；不会切换为PWM或修改帧配置。'
+            self.status.set(note)
+            messagebox.showinfo('尚无QAM符号', note, parent=self.window)
+            return
+        report = getattr(self, '_qam_report', None)
+        if report is not None and not report.closed and report.r is not r:
+            report.close()
+        if report is None or report.closed:
+            from rx706_qam_debug_gui import QAMReportWindow
+            report = QAMReportWindow(self.window, r, self.result)
+            self._qam_report = report
+        for tab in report.notebook.tabs():
+            if report.notebook.tab(tab, 'text') == '候选符号 / 比特':
+                report.notebook.select(tab)
+                break
+        report.window.deiconify()
+        report.window.lift()
+        report.window.focus_set()
+        return report.window
+
+    def show_pwm_symbols(self):
+        """Route by workflow; never reinterpret QAM as legacy PWM on a click."""
+        if self.closed:
+            return
+        from rx706_workflows import AREAS
+        qam_area = getattr(getattr(self, 'workflows', None), 'area', None) == AREAS[1]
+        if (qam_area or self.constellation_mode.get() in QAM_MODES or
+                getattr(self.recovery, 'kind', None) == 'qam'):
+            return self.show_qam_symbols()
         if self.busy:
             pwm_running = self.constellation_mode.get() in PWM_MODES
             if pwm_running:
@@ -1785,6 +2195,11 @@ class SpectrumWindow:
         if r.frame_check is not None:
             headers += ('帧内区段', '用户编号', '块编号', '块内净荷序号', '身份码有效', '完整块')
             field_names += ('frame_part', 'user_id', 'block_id', 'payload_index', 'identity_ok', 'block_complete')
+        if r.pulse_options and r.pulse_options.get('air_crc12_report'):
+            cr = r.pulse_options['air_crc12_report']['overall']
+            ttk.Label(outer, text='CRC12 observed-window BLER: '+str(cr['observed_scheduled_bler'])+
+                      ' | failed/expected: '+str(cr['failed_slots'])+'/'+str(cr['expected_complete_slots'])+
+                      ' | full-transmission BLER unknown; see exported pulse_config.air_crc12_report').pack(fill='x')
         table_box = ttk.Frame(outer)
         table_box.pack(fill='both', expand=True)
         tree = ttk.Treeview(table_box, columns=field_names, show='headings', height=15)
@@ -1974,6 +2389,10 @@ class SpectrumWindow:
             return
         self.closed = True
         self.cancel.set()
+        report = getattr(self, '_qam_report', None)
+        if report is not None and not report.closed:
+            report.close()
+        self._qam_report = None
         if hasattr(self, "navigation"):
             self.navigation.close()
         canvas = getattr(self, 'canvas', None)

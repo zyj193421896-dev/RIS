@@ -12,7 +12,7 @@ from rx706_pwm_frames import validate_frame_options
 PULSE_FIELDS = [('rise_s', 'f8'), ('fall_s', 'f8'), ('delay_chips', 'f8'),
                 ('delay_us', 'f8'), ('raw_pulse_us', 'f8'), ('tail_us', 'f8'),
                 ('calibration_error_us', 'f8'), ('decision_estimated', '?'),
-                ('decision_distance_chips', 'f8')]
+                ('decision_distance_chips', 'f8'), ('received_symbol', 'i4'), ('received_valid', '?')]
 
 
 def validate_pulse_options(options, symbol_hz, fs=None):
@@ -90,6 +90,19 @@ def validate_pulse_options(options, symbol_hz, fs=None):
     for user in frames['users']:
         if len(user['identity']) < 4:
             raise ValueError('身份前导至少需要4个已知符号')
+    if options.get('air_crc12'):
+        from rx706_pwm_crc12 import test_frames
+        expected = test_frames()
+        if frames.get('reference_enabled'):
+            raise ValueError('CRC12模式暂不支持旧16符号参考评分；请关闭参考，使用CRC统计')
+        if count != 8 or tuple(pairs) != tuple((0., float(w)) for w in range(5, 13)) or total != 20:
+            raise ValueError('CRC12 profile requires eight zero-delay widths 25% to 60%')
+        if len(frames['users']) != 3 or any(len(u['identity']) != 4 or u['payload_symbols'] != 16 for u in frames['users']):
+            raise ValueError('CRC12 profile requires three users with 4+16 physical symbols')
+        if [tuple(u['identity']) for u in frames['users']] != [(0,7,7,0),(0,0,7,7),(7,0,0,7)]:
+            raise ValueError('CRC12 identity codes do not match protocol')
+        if frames['identity_errors'] != 0 or options.get('cycle_calibration'):
+            raise ValueError('CRC12 requires identity_errors=0 and independent local tail calibration')
     cycle_cal = dict(options.get('cycle_calibration') or {})
     if cycle_cal:
         def integer(value, low, high):
@@ -385,6 +398,7 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
     rows['index'] = np.arange(count)+1
     rows['start_s'] = initial['anchor']+np.arange(count)*period
     rows['payload_index'] = -1
+    rows['received_symbol'] = -1
     rows['symbol'], rows['candidate_symbol'] = -1, -1
     rows['bits'], rows['candidate_bits'] = '?'*bits, '?'*bits
     rows['width_scale'] = 1.
@@ -398,6 +412,7 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
     calibrations, last_by_user = [], {}
     cycle_models = _cycle_models(schedule, config, pairs, rises, falls, period, fs)
     config['cycle_calibrated_blocks'] = len(cycle_models)
+    crc_records = []
     for block_at, item in enumerate(schedule):
         begin = item['symbol_at']
         end = min(count, begin+item['length'])
@@ -431,6 +446,23 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
         gain = calibration['width_gain'] if calibration else 1.
         offset = calibration['width_offset'] if calibration else np.nan
         valid_header = match is not None
+        tail_ok = True
+        if config.get('air_crc12'):
+            known = np.asarray([5.,12.,5.,12.])*period/total
+            measured = []
+            for j in range(12,16):
+                target = item['anchor']+j*period
+                allowance = config['tolerance_chips']*period/total+1/fs
+                a,b = np.searchsorted(rises,[target-allowance,target+allowance])
+                measured.append(falls[a]-rises[a] if b-a == 1 else np.nan)
+            measured = np.asarray(measured)
+            model = _width_model(known, measured, 1/fs) if np.all(np.isfinite(measured)) else None
+            tail_ok = bool(model is not None and .8 <= model[0] <= 1.25 and
+                           np.max(abs(measured-(model[0]*known+model[1]))) <= config['tolerance_chips']*period/total+1/fs)
+            if tail_ok:
+                gain, offset = model[:2]
+                tail = max(0., offset)
+
         # Use local marker phase with the globally measured period. Bad headers
         # keep their scheduled slots and are erased, including their payload.
         start = item['anchor']
@@ -455,6 +487,8 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
         rows['calibration_source'][begin:end] = '身份前导：下降沿拖尾校正' if valid_header else '身份失败：保持时隙'
         if valid_header and block_at in cycle_models:
             rows['calibration_source'][begin:end] = '循环已知码4点：跨循环中位数标定'
+        if config.get('air_crc12'):
+            rows['calibration_source'][begin:end] = '本帧尾部4点校准' if tail_ok else '尾部校准失败；身份模型仅诊断'
         rows['calibration_error_us'][begin:end] = calibration['error']*1e6 if calibration else np.nan
         for i in range(begin, end):
             if i % 1024 == 0:
@@ -524,12 +558,31 @@ def decode_pulses(states, transition_times, after, times, fs, symbol_hz, options
                                      '有效（最近码字估计；超容差）' if not within else
                                      '有效（循环已知码增益/偏置校正）' if block_at in cycle_models else
                                      '有效（身份前导拖尾校正）')
+            row['received_symbol'] = row['candidate_symbol']
+            row['received_valid'] = bool(row['structure_ok'] and row['candidate_symbol'] >= 0 and valid_header and (config['nearest_decision'] or (within and not tied)))
             if i < header_end or i in pilot_rows:
                 row['valid'], row['symbol'], row['bits'] = False, -3, '-'
                 row['decision_estimated'] = False
                 row['reason'] = '身份前导：仅定位与校准，不输出净荷' if valid_header else '身份前导失败：保持块位置'
                 if i in pilot_rows:
                     row['reason'] = '循环已知码校准前导：不参与净荷BER/BLER'
+        if config.get('air_crc12'):
+            received = [int(r['received_symbol']) if r['received_valid'] else None for r in rows[begin:end]]
+            received += [None]*(20-len(received))
+            crc_records.append(dict(user_id=user_at+1, received_symbols=received,
+                identity_ok=valid_header, calibration_ok=tail_ok, complete=begin+20<=count,
+                detected=valid_header, expected=True))
+            for position in range(begin+12,min(end,begin+20)):
+                rows['training'][position] = True
+                rows['frame_part'][position] = '尾部校准' if position < begin+16 else 'CRC12'
+                rows['valid'][position], rows['symbol'][position], rows['bits'][position] = False,-3,'-'
+    if config.get('air_crc12'):
+        from rx706_pwm_crc12 import score_slots
+        report = score_slots(crc_records, timeline_contiguous=False)
+        report['received_frames'] = crc_records
+        report.update(first_lock_s=float(initial['anchor']), last_observed_s=float(times[-1]),
+            limitation='Observed scheduled window only; pre-lock and unidentifiable acquisition gaps excluded. Initial acquisition uses identity, not CRC.')
+        config['air_crc12_report'] = report
     for calibration in calibrations:
         tail_seconds = calibration['tail_us']*1e-6
         guard = int(math.ceil(tail_seconds/period*total-1e-9))

@@ -24,6 +24,7 @@ def headless_window():
     view=SpectrumWindow.__new__(SpectrumWindow)
     view.closed=False; view.busy=True; view.result=None; view.recovery=None
     view.events=queue.Queue(); view.cancel=threading.Event()
+    view._pwm_dialog=view._pwm_dialog_result=None
     view.controls=[]; view.window=Mock(); view.toolbar=Mock()
     view.analyze_button=Mock(); view.stop_button=Mock()
     view.rate=Value(); view.status=Value(); view.summary=Value()
@@ -66,15 +67,22 @@ class SignalViewTests(unittest.TestCase):
                 self.assertEqual(sum(ax.get_visible() for ax in view.figure.axes),3 if name == '总览' else 1)
             view.figure.savefig(Path(tmp)/'plot.png')
 
+    def test_stop_retires_a_result_already_queued(self):
+        view=headless_window()
+        view.events.put(('result',(object(),None,None,None)))
+        view.cancel.set(); view.poll()
+        self.assertIsNone(view.result); self.assertIsNone(view.recovery)
+        self.assertFalse(view.busy); self.assertIn('停止',view.status.get())
+
     def test_busy_download_is_delivered_after_result(self):
         view=headless_window()
         view.offer_download('next.bin')
         self.assertEqual(view.pending_download,'next.bin')
-        view.analyze=Mock()
+        view.run_workflow=Mock()
         view.events.put(('cancelled','stopped'))
         view.poll()
         self.assertEqual(view.filename.get(),'next.bin')
-        view.analyze.assert_called_once()
+        view.run_workflow.assert_called_once()
 
 
 if __name__=='__main__': unittest.main()

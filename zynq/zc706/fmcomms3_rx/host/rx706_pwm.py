@@ -856,10 +856,13 @@ def recover_pwm(spectrum, *, symbol_hz=1e6/3, code_chips=8, guard_chips=2,
             _prefix_chips=prefix_chips, _total_chips=prefix_chips+code_chips+guard_chips,
             training_options=training_options, decision_mode=decision_mode, symbol_widths=symbol_widths,
             output_binary=output_binary)
-    # PWM may process a complete one-second span; other recovery modes keep
-    # their existing bounded read. Search probes always remain small.
+    # Explicit pulse-frame decoding supports complete two-second captures.
+    # Legacy PWM and other recovery modes retain their one-second read bounds.
+    # Pulse-frame mode disables onset cropping above, preserving elapsed time.
+    max_duration_s = 2 if pulse_options is not None else 1
     x, count, clipped = _read_span(spectrum, duration_s, center_hint_hz, cancel_event,
-                                  max_samples=math.ceil(fs), allow_clipped=_search_probe)
+                                  max_samples=math.ceil(max_duration_s*fs),
+                                  allow_clipped=_search_probe, max_duration_s=max_duration_s)
     if count < max(512, 8*fs/symbol_hz):
         raise ValueError('PWM 恢复至少需要 8 个完整符号，请增加恢复时长')
     _cancel(cancel_event)

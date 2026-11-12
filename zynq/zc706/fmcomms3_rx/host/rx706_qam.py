@@ -18,6 +18,19 @@ def decide(z, order):
     return ideal, labels, bits
 
 
+def decision_margins(z,order):
+    """Geometric distance to the nearest square-QAM decision boundary, not BER."""
+    side=math.isqrt(order);scale=math.sqrt(2*(order-1)/3)
+    boundaries=np.arange(2-side,side-1,2)/scale
+    def distance(values):
+        index=np.searchsorted(boundaries,values)
+        lower=np.where(index>0,abs(values-boundaries[np.clip(index-1,0,len(boundaries)-1)]),np.inf)
+        upper=np.where(index<len(boundaries),abs(values-boundaries[np.clip(index,0,len(boundaries)-1)]),np.inf)
+        return np.minimum(lower,upper)
+    values=np.asarray(z)
+    return np.minimum(distance(values.real),distance(values.imag))
+
+
 def recover_qam(spectrum, *, duration_s=.2, center_hint_hz=0, symbol_hz=100000,
                 order=256, rolloff=.35, pulse='RRC', preamble_options=None,
                 pwm_preamble_options=None, tdcm_options=None, cancel_event=None):
@@ -27,6 +40,8 @@ def recover_qam(spectrum, *, duration_s=.2, center_hint_hz=0, symbol_hz=100000,
             symbol_hz=symbol_hz,order=order,tdcm_options=tdcm_options,
             pwm_preamble_options=pwm_preamble_options,preamble_options=preamble_options,
             cancel_event=cancel_event)
+    if preamble_options is not None and (preamble_options.get('orientation','normal')!='normal' or preamble_options.get('fit_dc_offset',False)):
+        raise ValueError('镜像/零点训练校准目前用于TDCM谐波QAM路径')
     fs = spectrum.sample_rate_hz
     if order not in (16, 64, 256):
         raise ValueError('QAM 阶数须为16、64或256')

@@ -1,0 +1,41 @@
+{
+  "schema_version": 3,
+  "mode": "脉冲宽度与时延",
+  "user_count": 3,
+  "users": [
+    {
+      "name": "U1",
+      "identity": "0 7 7 0",
+      "payload_symbols": 16,
+      "reference": ""
+    },
+    {
+      "name": "U2",
+      "identity": "0 0 7 7",
+      "payload_symbols": 16,
+      "reference": ""
+    },
+    {
+      "name": "U3",
+      "identity": "7 0 0 7",
+      "payload_symbols": 16,
+      "reference": ""
+    }
+  ],
+  "search_symbols": 4096,
+  "identity_errors": 0,
+  "reference_enabled": false,
+  "reference_format": "符号值",
+  "reference_repeat": true,
+  "reference_reset": true,
+  "clock_width": true,
+  "symbol_khz": "169.971671",
+  "duty_step": "5",
+  "duty_count": "8",
+  "min_high_chips": "5",
+  "low_guard_chips": "8",
+  "joint_delay": false,
+  "codebook": "0 5\n0 6\n0 7\n0 8\n0 9\n0 10\n0 11\n0 12",
+  "width_quantization": "nearest",
+  "air_crc12": true
+}

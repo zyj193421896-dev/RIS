@@ -65,12 +65,12 @@ class ToneRecovery:
 
 
 def _read_span(spectrum, duration_s, center_hint_hz, cancel_event, *, max_samples=1 << 22,
-               allow_clipped=False):
+               allow_clipped=False, max_duration_s=1):
     _cancel(cancel_event)
     fs = spectrum.sample_rate_hz
     duration_s = float(duration_s)
-    if not math.isfinite(duration_s) or not .001 <= duration_s <= 1:
-        raise ValueError('恢复时长必须为 1～1000 ms')
+    if not math.isfinite(duration_s) or not .001 <= duration_s <= max_duration_s:
+        raise ValueError(f'恢复时长必须为 1～{max_duration_s*1000:g} ms')
     if center_hint_hz is not None and (not math.isfinite(float(center_hint_hz)) or abs(float(center_hint_hz)) >= fs/2):
         raise ValueError('载波中心提示必须在基带采样范围内')
     size = spectrum.total_tuples*8

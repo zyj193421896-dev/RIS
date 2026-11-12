@@ -26,9 +26,9 @@ def parse_preamble(text, representation, order):
     tokens = re.split(r'[;；\s]+', str(text).strip())
     if not 3 <= len(tokens) <= 256:
         raise ValueError('QAM前导须填写3～256个已知符号')
-    if representation == 'labels':
+    if representation in ('labels','hex'):
         try:
-            labels = [int(t, 16) if t.lower().startswith('0x') else
+            labels = [int(t, 16) if representation=='hex' or t.lower().startswith('0x') else
                       int(t, 2) if t.lower().startswith('0b') else int(t) for t in tokens]
         except ValueError:
             raise ValueError('前导符号值用空格分隔；二进制加0b，十六进制加0x') from None
@@ -52,6 +52,10 @@ def parse_preamble(text, representation, order):
 
 
 def validate_preamble(options, order, symbol_hz):
+    from rx706_qam_training import validate_orientation
+    validate_orientation(options)
+    if not isinstance(options.get('estimate_frequency',True),bool):
+        raise ValueError('QAM训练频偏估计开关须为布尔值')
     points = parse_preamble(options.get('symbols', ''), options.get('representation', 'labels'), order)
     bound = float(options.get('max_frequency_hz', 1000))
     tolerance = float(options.get('max_evm_percent', 10))

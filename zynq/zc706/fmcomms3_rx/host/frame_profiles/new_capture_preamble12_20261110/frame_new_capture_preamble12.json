@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "mode": "脉冲宽度与时延",
+  "user_count": 1,
+  "users": [
+    {
+      "name": "U1",
+      "identity": "0 65 8 54 2 42 10 21 6 60 4 35",
+      "payload_symbols": 66,
+      "reference": ""
+    }
+  ],
+  "search_symbols": 4096,
+  "identity_errors": 1,
+  "reference_enabled": false,
+  "reference_format": "符号值",
+  "reference_repeat": true,
+  "reference_reset": true,
+  "clock_width": true,
+  "symbol_khz": "169.971671",
+  "duty_step": "5",
+  "duty_count": "66",
+  "min_high_chips": "5",
+  "low_guard_chips": "5",
+  "joint_delay": true,
+  "codebook": "0 5\n0 6\n0 7\n0 8\n0 9\n0 10\n0 11\n0 12\n0 13\n0 14\n0 15\n1 5\n1 6\n1 7\n1 8\n1 9\n1 10\n1 11\n1 12\n1 13\n1 14\n2 5\n2 6\n2 7\n2 8\n2 9\n2 10\n2 11\n2 12\n2 13\n3 5\n3 6\n3 7\n3 8\n3 9\n3 10\n3 11\n3 12\n4 5\n4 6\n4 7\n4 8\n4 9\n4 10\n4 11\n5 5\n5 6\n5 7\n5 8\n5 9\n5 10\n6 5\n6 6\n6 7\n6 8\n6 9\n7 5\n7 6\n7 7\n7 8\n8 5\n8 6\n8 7\n9 5\n9 6\n10 5",
+  "width_quantization": "nearest",
+  "cycle_calibration": {},
+  "tolerance_chips": 0.4,
+  "nearest_decision": true
+}

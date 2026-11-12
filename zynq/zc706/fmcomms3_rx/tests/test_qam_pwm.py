@@ -118,9 +118,11 @@ class MixedQAMTests(unittest.TestCase):
     def test_validation_silence_and_cancellation(self):
         for change in [dict(symbols='0 0'), dict(symbols='0 13 0'),
                        dict(symbol_hz=1000000), dict(gap_s=-1),
-                       dict(width_offset_chips=-5), dict(qam_search_symbols=0)]:
+                       dict(width_offset_chips=-5), dict(qam_search_symbols=-1)]:
             with self.assertRaises(ValueError):
                 validate_pwm_header(change, 10000000)
+        # Zero is the restored explicit mode: QAM starts immediately after PWM.
+        self.assertEqual(validate_pwm_header(dict(qam_search_symbols=0), 10000000)['qam_search_symbols'], 0)
         with self.assertRaisesRegex(ValueError, '未找到'):
             acquire_pwm_header(np.zeros(10000, complex), 10000000, {})
         event = threading.Event()

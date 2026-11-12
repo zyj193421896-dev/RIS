@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "method": "tdcm_parameter_config",
+  "name": "256QAM 10kHz 四个25%PWM+4四角+256净荷",
+  "description": "四个25%占空比PWM，无可变时延；每周期起始高25%、低75%。随后00 08 88 80四角与256未知净荷，无间隔，K=1。总264周期、26.4ms。通用参数不绑定BIN；保持25%误差门限，不能保证新采集锁定；BER未测。",
+  "order": 256,
+  "symbol_hz": 10000.0,
+  "tdcm_options": {
+    "payload_repeat": 1,
+    "payload_data_symbols": 256,
+    "payload_tail_symbols": 0,
+    "crc_debug": {
+      "enabled": false
+    },
+    "base_hz": 10000.0,
+    "harmonic": 1,
+    "amplitude_scale": 1.0,
+    "phase_deg": 0.0,
+    "payload_symbols": 0,
+    "normalization": "blind",
+    "acquisition_mode": "pwm",
+    "compensation": {
+      "enabled": true,
+      "clock_mode": "off",
+      "phase_mode": "off",
+      "frame_mode": "all",
+      "frame_symbols": 260,
+      "max_frames": 2048,
+      "calibration_frames": 20,
+      "period_ppm": 0.0,
+      "fit_timing": false,
+      "clock_search_ppm": 200.0,
+      "phase_update_hz": 2000.0,
+      "phase_bandwidth_hz": 300.0,
+      "max_input_samples": 16777216,
+      "timing_offset_symbols": 0.0,
+      "timing_search_symbols": 0.05,
+      "quality_evm_percent": 8.0
+    }
+  },
+  "pwm_preamble_options": {
+    "total_chips": 256,
+    "prefix_chips": 64,
+    "guard_chips": 192,
+    "symbols": "0 0 0 0",
+    "symbol_hz": 10000.0,
+    "gap_s": 0.0,
+    "search_s": 0.2,
+    "max_error_percent": 25.0,
+    "width_offset_chips": 0.0,
+    "max_frequency_hz": 1000.0,
+    "qam_search_symbols": 0.0
+  },
+  "preamble_options": {
+    "symbols": "00 08 88 80",
+    "representation": "hex",
+    "max_frequency_hz": 1000.0,
+    "max_evm_percent": 10.0,
+    "search_s": 1.0,
+    "orientation": "auto",
+    "fit_dc_offset": true,
+    "estimate_frequency": false
+  }
+}
